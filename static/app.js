@@ -863,6 +863,7 @@ document.addEventListener('keydown', (e) => {
 
 // ── Screen Navigation ─────────────────────────────────────────────────────
 async function showScreen(id) {
+    if (id === 'settings' && _isGuest()) return;
     // Capture the previous screen before changing active classes
     const prevScreenId = document.querySelector('.screen.active')?.id;
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -1801,6 +1802,7 @@ function heartBtn(filename, isFav) {
 }
 
 function editBtn(song) {
+    if (_isGuest()) return '';
     return `<button data-edit='${JSON.stringify({f:song.filename,t:song.title||'',a:song.artist||'',al:song.album||'',y:song.year||''}).replace(/'/g,"&#39;")}' class="edit-btn text-gray-600 hover:text-accent-light transition" title="Edit metadata"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg></button>`;
 }
 
@@ -2447,6 +2449,7 @@ async function exportDiagnostics() {
 }
 
 async function uploadSongs(fileList) {
+    if (_isGuest()) return;
     if (!fileList || fileList.length === 0) return;
     const all = Array.from(fileList);
     // Optional UI element — only present when on the Settings screen.
@@ -4888,6 +4891,7 @@ registerShortcut({
 
 // ── Edit metadata modal ─────────────────────────────────────────────────
 function openEditModal(songData, openerEl) {
+    if (_isGuest()) return;
     const artUrl = `/api/song/${encodeURIComponent(songData.f)}/art?t=${Date.now()}`;
     const modal = document.createElement('div');
     modal.id = 'edit-modal';
@@ -5745,6 +5749,97 @@ async function bootstrapPluginsAndUi() {
     return plugins;
 }
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+let _loginResolve = null;
+
+function _authRole() { return sessionStorage.getItem('slopsmith_role'); }
+function _isGuest() { return _authRole() === 'guest'; }
+
+function _applyAuthUi() {
+    const guest = _isGuest();
+    document.querySelectorAll('.nav-upload').forEach(el => el.classList.toggle('hidden', guest));
+    document.querySelectorAll('.nav-settings').forEach(el => el.classList.toggle('hidden', guest));
+    document.querySelectorAll('.nav-logout').forEach(el => el.classList.remove('hidden'));
+}
+
+async function _initAuth() {
+    if (_authRole()) { _applyAuthUi(); return; }
+    let passwordSet = false;
+    try {
+        const res = await fetch('/api/auth/config');
+        if (res.ok) { const d = await res.json(); passwordSet = d.password_set; }
+    } catch (_) {}
+    if (!passwordSet) {
+        sessionStorage.setItem('slopsmith_role', 'admin');
+        _applyAuthUi();
+        return;
+    }
+    // Show login screen and wait
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const loginEl = document.getElementById('login');
+    if (loginEl) loginEl.classList.add('active');
+    await new Promise(resolve => { _loginResolve = resolve; });
+    _applyAuthUi();
+}
+
+async function loginWithPassword() {
+    const pwEl = document.getElementById('login-password');
+    const errEl = document.getElementById('login-error');
+    const btn = document.getElementById('btn-login');
+    const pw = pwEl ? pwEl.value : '';
+    if (errEl) errEl.classList.add('hidden');
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking...'; }
+    try {
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pw }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            sessionStorage.setItem('slopsmith_role', 'admin');
+            if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+        } else {
+            if (errEl) { errEl.textContent = 'Incorrect password.'; errEl.classList.remove('hidden'); }
+            if (pwEl) { pwEl.value = ''; pwEl.focus(); }
+        }
+    } catch (e) {
+        if (errEl) { errEl.textContent = 'Could not reach server.'; errEl.classList.remove('hidden'); }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Log In'; }
+    }
+}
+
+function loginAsGuest() {
+    sessionStorage.setItem('slopsmith_role', 'guest');
+    if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+}
+
+function authLogout() {
+    sessionStorage.removeItem('slopsmith_role');
+    location.reload();
+}
+
+async function saveAdminPassword() {
+    const pwEl = document.getElementById('admin-password');
+    const statusEl = document.getElementById('admin-password-status');
+    const pw = pwEl ? pwEl.value : '';
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ admin_password: pw }),
+        });
+        const data = await res.json();
+        if (statusEl) statusEl.textContent = pw ? 'Password saved.' : 'Password removed — login screen disabled.';
+        if (pwEl) pwEl.value = '';
+        if (data.error && statusEl) statusEl.textContent = 'Error: ' + data.error;
+    } catch (e) {
+        if (statusEl) statusEl.textContent = 'Save failed.';
+    }
+}
+
 // Load library on start. loadSettings is awaited alongside so persisted
 // values (A/V offset, mastery, etc.) are applied to the highway + HUD
 // before any playSong runs — otherwise a fast click could start
@@ -5770,6 +5865,8 @@ async function bootstrapPluginsAndUi() {
         // instead of silently bringing the library flash back.
         try { await showScreen('player'); }
         catch (e) { console.warn('[slopsmith] follower-window: showScreen("player") failed:', e); }
+    } else {
+        await _initAuth();
     }
     // Restore library-filter UI state from localStorage before the first
     // grid fetch so the badge/chips are accurate immediately

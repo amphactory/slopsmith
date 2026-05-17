@@ -46,9 +46,10 @@
             <div class="hidden md:flex items-center gap-8">
                 <a href="#" onclick="showScreen('home');return false" class="text-sm text-gray-400 hover:text-white transition">Library</a>
                 <a href="#" onclick="showScreen('favorites');return false" class="text-sm text-gray-400 hover:text-white transition">Favorites</a>
-                <a href="#" onclick="document.getElementById('upload-songs-file').click();return false" class="text-sm text-gray-400 hover:text-white transition">Upload</a>
+                <a href="#" onclick="document.getElementById('upload-songs-file').click();return false" class="nav-upload text-sm text-gray-400 hover:text-white transition">Upload</a>
                 <span id="nav-plugins" class="contents"></span>
-                <a href="#" onclick="showScreen('settings');return false" class="text-sm text-gray-400 hover:text-white transition">Settings</a>
+                <a href="#" onclick="showScreen('settings');return false" class="nav-settings text-sm text-gray-400 hover:text-white transition">Settings</a>
+                <a href="#" onclick="authLogout();return false" class="nav-logout hidden text-sm text-gray-500 hover:text-white transition">Log out</a>
             </div>
             <!-- Mobile menu -->
             <button onclick="document.getElementById('mobile-menu').classList.toggle('hidden')" class="md:hidden text-gray-400">
@@ -59,11 +60,12 @@
             <div class="px-6 py-4 flex flex-col gap-3">
                 <a href="#" onclick="showScreen('home');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Library</a>
                 <a href="#" onclick="showScreen('favorites');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Favorites</a>
-                <a href="#" onclick="document.getElementById('upload-songs-file').click();this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Upload</a>
+                <a href="#" onclick="document.getElementById('upload-songs-file').click();this.parentElement.parentElement.classList.add('hidden');return false" class="nav-upload text-gray-400 hover:text-white">Upload</a>
                 <span id="mobile-nav-plugins" class="flex flex-col gap-2 border-t border-b border-gray-800 py-2 my-1">
                     <span class="text-xs text-gray-600 uppercase tracking-wider">Plugins</span>
                 </span>
-                <a href="#" onclick="showScreen('settings');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Settings</a>
+                <a href="#" onclick="showScreen('settings');this.parentElement.parentElement.classList.add('hidden');return false" class="nav-settings text-gray-400 hover:text-white">Settings</a>
+                <a href="#" onclick="authLogout();this.parentElement.parentElement.classList.add('hidden');return false" class="nav-logout hidden text-gray-500 hover:text-white">Log out</a>
             </div>
         </div>
     </nav>
@@ -72,8 +74,44 @@
          level so it stays reachable regardless of which screen is active. -->
     <input type="file" id="upload-songs-file" accept=".psarc,.sloppak" multiple class="hidden" onchange="uploadSongs(this.files); this.value=''">
 
+    <!-- ══ LOGIN ════════════════════════════════════════════════════════════ -->
+    <div id="login" class="screen active">
+        <div class="min-h-screen flex items-center justify-center px-4 pt-16">
+            <div class="w-full max-w-sm">
+                <div class="text-center mb-10">
+                    <div class="text-5xl mb-4">🎸</div>
+                    <h1 class="text-3xl font-bold bg-gradient-to-r from-accent-light to-purple-400 bg-clip-text text-transparent">Slopsmith</h1>
+                    <p class="text-gray-500 mt-2 text-sm">Your Rocksmith practice companion</p>
+                </div>
+                <div class="bg-dark-700 border border-gray-800 rounded-2xl p-8 space-y-4">
+                    <div id="login-password-section">
+                        <label class="text-sm font-medium text-gray-400 mb-2 block">Admin Password</label>
+                        <input type="password" id="login-password" placeholder="Enter password..."
+                            class="w-full bg-dark-600 border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 focus:border-accent/50 focus:ring-1 focus:ring-accent/30 outline-none transition"
+                            onkeydown="if(event.key==='Enter')loginWithPassword()">
+                        <p id="login-error" class="text-xs text-red-400 mt-2 hidden"></p>
+                        <button onclick="loginWithPassword()" id="btn-login"
+                            class="w-full mt-4 bg-accent hover:bg-accent-light px-6 py-3 rounded-xl text-sm font-semibold text-white transition">
+                            Log In
+                        </button>
+                    </div>
+                    <div class="relative flex items-center gap-3" id="login-divider">
+                        <div class="flex-1 border-t border-gray-700"></div>
+                        <span class="text-xs text-gray-600">or</span>
+                        <div class="flex-1 border-t border-gray-700"></div>
+                    </div>
+                    <button onclick="loginAsGuest()"
+                        class="w-full bg-dark-600 hover:bg-dark-500 border border-gray-700 px-6 py-3 rounded-xl text-sm text-gray-300 transition">
+                        Enter as Guest
+                        <span class="block text-xs text-gray-600 mt-0.5">Browse and play songs — no editing or settings</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ══ HOME (Hero + Library) ══════════════════════════════════════════ -->
-    <div id="home" class="screen active">
+    <div id="home" class="screen">
         <!-- Library -->
         <section id="library-section" class="max-w-7xl mx-auto px-6 pt-24 pb-16">
             <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-10">
@@ -292,6 +330,16 @@
                                 <button onclick="saveSettings()" class="bg-accent hover:bg-accent-light px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition">Save</button>
                             </div>
                             <p class="text-xs text-gray-600 mt-1">Optional. Run <a href="https://github.com/byrongamatos/slopsmith-demucs-server" target="_blank" rel="noopener" class="text-accent hover:text-accent-light underline">slopsmith-demucs-server</a> on a machine with a GPU to offload stem splitting and avoid resource exhaustion on the host running Slopsmith.</p>
+                        </div>
+                        <div id="admin-password-section">
+                            <label class="text-sm font-medium text-gray-400 mb-2 block">Admin Password</label>
+                            <div class="flex gap-3">
+                                <input type="password" id="admin-password" placeholder="New password (leave blank to remove)..."
+                                    class="flex-1 bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 placeholder-gray-600 focus:border-accent/50 outline-none">
+                                <button onclick="saveAdminPassword()" class="bg-accent hover:bg-accent-light px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition">Save</button>
+                            </div>
+                            <p class="text-xs text-gray-600 mt-1">Protects the app with a login screen. Leave blank and save to remove password protection.</p>
+                            <div id="admin-password-status" class="text-xs text-gray-500 mt-1"></div>
                         </div>
                         <div>
                             <label class="text-sm font-medium text-gray-400 mb-2 block">Library</label>

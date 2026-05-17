@@ -2346,10 +2346,32 @@ def _load_config(config_file):
     return parsed if isinstance(parsed, dict) else None
 
 
+@app.get("/api/auth/config")
+def get_auth_config():
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    return {"password_set": bool(cfg.get("admin_password_hash"))}
+
+
+@app.post("/api/auth/login")
+def auth_login(data: dict):
+    password = data.get("password", "")
+    if not isinstance(password, str):
+        return JSONResponse({"ok": False}, status_code=400)
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    stored_hash = cfg.get("admin_password_hash", "")
+    if not stored_hash:
+        return {"ok": True}
+    pw_hash = hashlib.sha256(password.encode()).hexdigest()
+    return {"ok": pw_hash == stored_hash}
+
+
 @app.get("/api/settings")
 def get_settings():
     cfg = _load_config(CONFIG_DIR / "config.json")
-    return cfg if cfg is not None else _default_settings()
+    result = dict(cfg) if cfg is not None else _default_settings()
+    result.pop("admin_password_hash", None)
+    result["password_set"] = bool(cfg and cfg.get("admin_password_hash"))
+    return result
 
 
 @app.post("/api/settings")
@@ -2447,6 +2469,15 @@ def save_settings(data: dict):
             if not isinstance(raw, str) or raw not in ("both", "pc", "mac"):
                 return {"error": "psarc_platform must be 'both', 'pc', or 'mac'"}
             cfg["psarc_platform"] = raw
+
+    if "admin_password" in data:
+        pw = data["admin_password"]
+        if not isinstance(pw, str):
+            return {"error": "admin_password must be a string"}
+        if pw:
+            cfg["admin_password_hash"] = hashlib.sha256(pw.encode()).hexdigest()
+        else:
+            cfg.pop("admin_password_hash", None)
 
     config_file.write_text(json.dumps(cfg, indent=2))
     return {"message": ". ".join(messages) if messages else "Settings saved"}
