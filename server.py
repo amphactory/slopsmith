@@ -42,6 +42,7 @@ import contextvars
 import inspect
 import ipaddress
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -53,6 +54,60 @@ import structlog
 from fastapi import Request
 
 app = FastAPI(title="Rocksmith Web")
+
+# ── Auth session state ────────────────────────────────────────────────────────
+_SESSIONS: dict[str, str] = {}          # token → role ('admin' | 'guest')
+_LOGIN_FAILURES: dict[str, tuple[int, float]] = {}  # ip → (count, window_start)
+_LOGIN_FAILURE_WINDOW = 60              # seconds
+_LOGIN_MAX_ATTEMPTS = 5
+
+
+def _scrypt_hash(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return salt.hex() + ":" + h.hex()
+
+
+def _scrypt_verify(password: str, stored: str) -> bool:
+    try:
+        if ":" in stored:
+            salt_hex, hash_hex = stored.split(":", 1)
+            h = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=16384, r=8, p=1)
+            return secrets.compare_digest(h.hex(), hash_hex)
+        # Legacy SHA-256 fallback
+        return secrets.compare_digest(hashlib.sha256(password.encode()).hexdigest(), stored)
+    except Exception:
+        return False
+
+
+def _client_ip(request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.time()
+    if ip in _LOGIN_FAILURES:
+        count, since = _LOGIN_FAILURES[ip]
+        if now - since < _LOGIN_FAILURE_WINDOW:
+            return count >= _LOGIN_MAX_ATTEMPTS
+        del _LOGIN_FAILURES[ip]
+    return False
+
+
+def _record_failure(ip: str) -> None:
+    now = time.time()
+    count, since = _LOGIN_FAILURES.get(ip, (0, now))
+    _LOGIN_FAILURES[ip] = (count + 1 if now - since < _LOGIN_FAILURE_WINDOW else 1, since if now - since < _LOGIN_FAILURE_WINDOW else now)
+
+
+def _create_session(role: str, request) -> tuple[str, bool]:
+    token = secrets.token_urlsafe(32)
+    _SESSIONS[token] = role
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    is_secure = request.url.scheme == "https" or proto.lower() == "https"
+    return token, is_secure
+
 
 # Plugins that maintain session stores can register a cleanup callback here.
 # The demo-mode janitor calls every registered hook once per hour so stale
@@ -208,6 +263,42 @@ async def _demo_mode_guard(request: Request, call_next):
             )
         return response
     return await call_next(request)
+
+
+_AUTH_EXEMPT_EXACT = {
+    ("POST", "/api/auth/login"),
+    ("GET",  "/api/auth/config"),
+    ("GET",  "/api/auth/session"),
+    ("POST", "/api/auth/guest"),
+    ("POST", "/api/auth/logout"),
+}
+
+
+@app.middleware("http")
+async def _auth_guard(request: Request, call_next):
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    if not cfg.get("admin_password_hash"):
+        return await call_next(request)
+
+    path = request.url.path
+    method = request.method
+
+    if (method, path) in _AUTH_EXEMPT_EXACT or path == "/" or path.startswith("/static/"):
+        return await call_next(request)
+
+    token = request.cookies.get("slopsmith_session", "")
+    role = _SESSIONS.get(token)
+
+    if not role:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if role == "guest":
+        for blocked_method, pattern in _DEMO_BLOCKED:
+            if method == blocked_method and pattern.match(path):
+                return JSONResponse({"error": "guests cannot perform this action"}, status_code=403)
+
+    return await call_next(request)
+
 
 from asgi_correlation_id import CorrelationIdMiddleware
 
@@ -2352,17 +2443,51 @@ def get_auth_config():
     return {"password_set": bool(cfg.get("admin_password_hash"))}
 
 
+@app.get("/api/auth/session")
+def auth_session(request: Request):
+    token = request.cookies.get("slopsmith_session", "")
+    role = _SESSIONS.get(token)
+    return {"ok": bool(role), "role": role}
+
+
 @app.post("/api/auth/login")
-def auth_login(data: dict):
+def auth_login(request: Request, data: dict):
+    ip = _client_ip(request)
+    if _rate_limited(ip):
+        return JSONResponse({"ok": False, "error": "too many attempts"}, status_code=429)
     password = data.get("password", "")
     if not isinstance(password, str):
         return JSONResponse({"ok": False}, status_code=400)
     cfg = _load_config(CONFIG_DIR / "config.json") or {}
     stored_hash = cfg.get("admin_password_hash", "")
-    if not stored_hash:
-        return {"ok": True}
-    pw_hash = hashlib.sha256(password.encode()).hexdigest()
-    return {"ok": pw_hash == stored_hash}
+    if stored_hash and not _scrypt_verify(password, stored_hash):
+        _record_failure(ip)
+        return {"ok": False}
+    _LOGIN_FAILURES.pop(ip, None)
+    token, is_secure = _create_session("admin", request)
+    resp = JSONResponse({"ok": True, "role": "admin"})
+    resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
+    return resp
+
+
+@app.post("/api/auth/guest")
+def auth_guest(request: Request):
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    if not cfg.get("admin_password_hash"):
+        return JSONResponse({"error": "no password configured"}, status_code=400)
+    token, is_secure = _create_session("guest", request)
+    resp = JSONResponse({"ok": True, "role": "guest"})
+    resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
+    return resp
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    token = request.cookies.get("slopsmith_session", "")
+    _SESSIONS.pop(token, None)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("slopsmith_session")
+    return resp
 
 
 @app.get("/api/settings")
@@ -2475,9 +2600,10 @@ def save_settings(data: dict):
         if not isinstance(pw, str):
             return {"error": "admin_password must be a string"}
         if pw:
-            cfg["admin_password_hash"] = hashlib.sha256(pw.encode()).hexdigest()
+            cfg["admin_password_hash"] = _scrypt_hash(pw)
         else:
             cfg.pop("admin_password_hash", None)
+        _SESSIONS.clear()  # force re-login after password change
 
     config_file.write_text(json.dumps(cfg, indent=2))
     return {"message": ". ".join(messages) if messages else "Settings saved"}

@@ -5756,26 +5756,61 @@ let _loginResolve = null;
 function _authRole() { return sessionStorage.getItem('slopsmith_role'); }
 function _isGuest() { return _authRole() === 'guest'; }
 
+function _setNavVisible(visible) {
+    const links = document.getElementById('nav-links');
+    const mobileBtn = document.getElementById('nav-mobile-btn');
+    if (links) links.style.display = visible ? '' : 'none';
+    if (mobileBtn) mobileBtn.style.display = visible ? '' : 'none';
+}
+
 function _applyAuthUi() {
     const guest = _isGuest();
+    _setNavVisible(true);
     document.querySelectorAll('.nav-upload').forEach(el => el.classList.toggle('hidden', guest));
     document.querySelectorAll('.nav-settings').forEach(el => el.classList.toggle('hidden', guest));
     document.querySelectorAll('.nav-logout').forEach(el => el.classList.remove('hidden'));
 }
 
 async function _initAuth() {
-    if (_authRole()) { _applyAuthUi(); return; }
+    // Resume existing server session (httpOnly cookie sent automatically)
+    try {
+        const res = await fetch('/api/auth/session');
+        if (res.ok) {
+            const d = await res.json();
+            if (d.ok) {
+                sessionStorage.setItem('slopsmith_role', d.role);
+                _applyAuthUi();
+                return;
+            }
+        }
+    } catch (_) {}
+
+    // No valid session — check if password protection is enabled
     let passwordSet = false;
     try {
         const res = await fetch('/api/auth/config');
         if (res.ok) { const d = await res.json(); passwordSet = d.password_set; }
     } catch (_) {}
+
     if (!passwordSet) {
-        sessionStorage.setItem('slopsmith_role', 'admin');
+        // No password configured — auto-login as admin
+        try {
+            const res = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: '' }),
+            });
+            if (res.ok) {
+                const d = await res.json();
+                sessionStorage.setItem('slopsmith_role', d.role || 'admin');
+            }
+        } catch (_) {}
         _applyAuthUi();
         return;
     }
-    // Show login screen and wait
+
+    // Show login screen, hide navbar
+    _setNavVisible(false);
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     const loginEl = document.getElementById('login');
     if (loginEl) loginEl.classList.add('active');
@@ -5796,9 +5831,13 @@ async function loginWithPassword() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password: pw }),
         });
+        if (res.status === 429) {
+            if (errEl) { errEl.textContent = 'Too many attempts. Wait a minute.'; errEl.classList.remove('hidden'); }
+            return;
+        }
         const data = await res.json();
         if (data.ok) {
-            sessionStorage.setItem('slopsmith_role', 'admin');
+            sessionStorage.setItem('slopsmith_role', data.role || 'admin');
             if (_loginResolve) { _loginResolve(); _loginResolve = null; }
         } else {
             if (errEl) { errEl.textContent = 'Incorrect password.'; errEl.classList.remove('hidden'); }
@@ -5811,12 +5850,18 @@ async function loginWithPassword() {
     }
 }
 
-function loginAsGuest() {
-    sessionStorage.setItem('slopsmith_role', 'guest');
-    if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+async function loginAsGuest() {
+    try {
+        const res = await fetch('/api/auth/guest', { method: 'POST' });
+        if (res.ok) {
+            sessionStorage.setItem('slopsmith_role', 'guest');
+            if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+        }
+    } catch (_) {}
 }
 
-function authLogout() {
+async function authLogout() {
+    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
     sessionStorage.removeItem('slopsmith_role');
     location.reload();
 }
@@ -5832,7 +5877,7 @@ async function saveAdminPassword() {
             body: JSON.stringify({ admin_password: pw }),
         });
         const data = await res.json();
-        if (statusEl) statusEl.textContent = pw ? 'Password saved.' : 'Password removed — login screen disabled.';
+        if (statusEl) statusEl.textContent = pw ? 'Password saved. Re-login required.' : 'Password removed — login disabled.';
         if (pwEl) pwEl.value = '';
         if (data.error && statusEl) statusEl.textContent = 'Error: ' + data.error;
     } catch (e) {
