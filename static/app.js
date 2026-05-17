@@ -3311,6 +3311,7 @@ async function playSong(filename, arrangement) {
     _playerOriginScreen = (_launchFrom && (_launchFrom.id === 'home' || _launchFrom.id === 'favorites'))
         ? _launchFrom.id : 'home';
     showScreen('player');
+    _updateFabPosition();
 
     // Wait for previous WebSocket to fully close before opening new one
     await new Promise(r => setTimeout(r, 500));
@@ -3389,6 +3390,44 @@ async function changeArrangement(index) {
         highway.reconnect(currentFilename, index);
         window.slopsmith.emit('arrangement:changed', { index, filename: currentFilename });
     }
+}
+
+function togglePlayerFullscreen() {
+    const player = document.getElementById('player');
+    if (!document.fullscreenElement) {
+        const fn = player.requestFullscreen || player.webkitRequestFullscreen || player.mozRequestFullScreen;
+        if (fn) fn.call(player);
+    } else {
+        const fn = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen;
+        if (fn) fn.call(document);
+    }
+}
+
+document.addEventListener('fullscreenchange', () => {
+    const btn = document.getElementById('btn-fullscreen');
+    if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
+});
+window.addEventListener('resize', _updateFabPosition);
+
+function _updateFabPosition() {
+    const fab = document.getElementById('player-fab');
+    const controls = document.getElementById('player-controls');
+    if (!fab) return;
+    const controlsH = (controls && controls.style.display !== 'none') ? controls.offsetHeight : 0;
+    fab.style.bottom = (controlsH + 8) + 'px';
+}
+
+let _controlsVisible = true;
+function togglePlayerControls() {
+    const controls = document.getElementById('player-controls');
+    const btn = document.getElementById('btn-controls-toggle');
+    if (!controls) return;
+    _controlsVisible = !_controlsVisible;
+    controls.style.display = _controlsVisible ? '' : 'none';
+    btn.title = _controlsVisible ? 'Hide controls' : 'Show controls';
+    btn.style.background = _controlsVisible ? '' : 'rgba(64,128,224,0.3)';
+    _updateFabPosition();
+    if (window.highway) highway.resize();
 }
 
 async function togglePlay() {
