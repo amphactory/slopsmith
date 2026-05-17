@@ -5816,6 +5816,7 @@ async function _initAuth() {
     if (loginEl) loginEl.classList.add('active');
     await new Promise(resolve => { _loginResolve = resolve; });
     _applyAuthUi();
+    await showScreen('home');
 }
 
 async function loginWithPassword() {

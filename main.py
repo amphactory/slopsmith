@@ -44,6 +44,11 @@ def run() -> None:
         # record — including early startup messages — passes through the same
         # structured pipeline.
         log_config=None,
+        # Trust X-Forwarded-Proto / X-Forwarded-For from reverse proxies
+        # (Cloudflare tunnel, nginx, etc.) so request.url.scheme and
+        # request.client reflect the real client connection.
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
 
 
