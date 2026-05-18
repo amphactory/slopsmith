@@ -863,7 +863,7 @@ document.addEventListener('keydown', (e) => {
 
 // ── Screen Navigation ─────────────────────────────────────────────────────
 async function showScreen(id) {
-    if (id === 'settings' && !_isAdmin()) return;
+    if (id === 'settings' && !_isLoggedIn()) return;
     // Capture the previous screen before changing active classes
     const prevScreenId = document.querySelector('.screen.active')?.id;
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -1940,6 +1940,9 @@ async function loadSettings() {
     if (window.slopsmithDesktop && typeof window.slopsmithDesktop.pickDirectory === 'function') {
         document.getElementById('btn-pick-dlc')?.classList.remove('hidden');
     }
+    document.querySelectorAll('.admin-only-section').forEach(el =>
+        el.classList.toggle('hidden', !_isAdmin()));
+    loadProfileSettings();
 }
 
 // A/V sync calibration. Positive = audio runs ahead of visuals; we
@@ -5795,6 +5798,7 @@ let _authConfig = {};
 
 function _authRole() { return sessionStorage.getItem('slopsmith_role'); }
 function _isAdmin() { return _authRole() === 'admin'; }
+function _isLoggedIn() { return _authRole() !== null; }
 
 function _setNavVisible(visible) {
     const links = document.getElementById('nav-links');
@@ -5807,7 +5811,7 @@ function _applyAuthUi() {
     const admin = _isAdmin();
     _setNavVisible(true);
     document.querySelectorAll('.nav-upload').forEach(el => el.classList.toggle('hidden', !admin));
-    document.querySelectorAll('.nav-settings').forEach(el => el.classList.toggle('hidden', !admin));
+    document.querySelectorAll('.nav-settings').forEach(el => el.classList.toggle('hidden', false));
     document.querySelectorAll('.nav-logout').forEach(el => el.classList.remove('hidden'));
 }
 
@@ -5832,6 +5836,7 @@ async function _initAuth() {
             if (d.ok) {
                 sessionStorage.setItem('slopsmith_role', d.role);
                 sessionStorage.setItem('slopsmith_username', d.username || '');
+                if (d.user_id) sessionStorage.setItem('slopsmith_user_id', d.user_id);
                 _applyAuthUi();
                 return;
             }
@@ -5928,6 +5933,7 @@ async function loginWithPassword() {
         if (data.ok) {
             sessionStorage.setItem('slopsmith_role', data.role || 'user');
             sessionStorage.setItem('slopsmith_username', data.username || un);
+            if (data.user_id) sessionStorage.setItem('slopsmith_user_id', data.user_id);
             if (_loginResolve) { _loginResolve(); _loginResolve = null; }
         } else {
             if (errEl) { errEl.textContent = 'Incorrect username or password.'; errEl.classList.remove('hidden'); }
@@ -5970,6 +5976,7 @@ async function registerUser() {
         if (data.ok) {
             sessionStorage.setItem('slopsmith_role', data.role || 'user');
             sessionStorage.setItem('slopsmith_username', data.username || username);
+            if (data.user_id) sessionStorage.setItem('slopsmith_user_id', data.user_id);
             if (_loginResolve) { _loginResolve(); _loginResolve = null; }
         } else {
             if (errEl) { errEl.textContent = data.error || 'Registration failed.'; errEl.classList.remove('hidden'); }
@@ -5986,6 +5993,7 @@ async function authLogout() {
     try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
     sessionStorage.removeItem('slopsmith_role');
     sessionStorage.removeItem('slopsmith_username');
+    sessionStorage.removeItem('slopsmith_user_id');
     location.reload();
 }
 
@@ -6006,6 +6014,86 @@ async function saveAdminPassword() {
     } catch (e) {
         if (statusEl) statusEl.textContent = 'Save failed.';
     }
+}
+
+async function loadProfileSettings() {
+    try {
+        const resp = await fetch('/api/profile');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const nameEl = document.getElementById('profile-display-name');
+        const instrEl = document.getElementById('profile-instrument');
+        const bioEl = document.getElementById('profile-bio');
+        const countEl = document.getElementById('profile-bio-count');
+        if (nameEl) nameEl.value = data.display_name || '';
+        if (instrEl) instrEl.value = data.instrument || '';
+        if (bioEl) { bioEl.value = data.bio || ''; }
+        if (countEl) countEl.textContent = (data.bio || '').length;
+        _profileUpdateAvatar(data.has_avatar ? `/api/profile/avatar/${_profileUserId()}` : null);
+    } catch (_) {}
+}
+
+function _profileUserId() {
+    return sessionStorage.getItem('slopsmith_user_id') || '';
+}
+
+function _profileUpdateAvatar(url) {
+    const img = document.getElementById('profile-avatar-img');
+    const placeholder = document.getElementById('profile-avatar-placeholder');
+    if (!img || !placeholder) return;
+    if (url) {
+        img.src = url + '?t=' + Date.now();
+        img.classList.remove('hidden');
+        placeholder.classList.add('hidden');
+    } else {
+        img.classList.add('hidden');
+        placeholder.classList.remove('hidden');
+    }
+}
+
+async function saveProfile() {
+    const statusEl = document.getElementById('profile-status');
+    const display_name = (document.getElementById('profile-display-name')?.value || '').trim();
+    const instrument = document.getElementById('profile-instrument')?.value || '';
+    const bio = (document.getElementById('profile-bio')?.value || '').trim();
+    try {
+        const res = await fetch('/api/profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ display_name, instrument, bio }),
+        });
+        const data = await res.json();
+        if (statusEl) statusEl.textContent = data.ok ? 'Saved.' : ('Error: ' + (data.error || 'unknown'));
+        if (data.ok && statusEl) setTimeout(() => { statusEl.textContent = ''; }, 2000);
+    } catch (_) {
+        if (statusEl) statusEl.textContent = 'Save failed.';
+    }
+}
+
+async function uploadAvatar(input) {
+    const statusEl = document.getElementById('profile-status');
+    const file = input.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+        if (statusEl) statusEl.textContent = 'Image too large (max 2 MB).';
+        input.value = '';
+        return;
+    }
+    const form = new FormData();
+    form.append('avatar', file);
+    try {
+        const res = await fetch('/api/profile/avatar', { method: 'POST', body: form });
+        const data = await res.json();
+        if (data.ok) {
+            _profileUpdateAvatar(data.url);
+            if (statusEl) { statusEl.textContent = 'Avatar updated.'; setTimeout(() => { statusEl.textContent = ''; }, 2000); }
+        } else {
+            if (statusEl) statusEl.textContent = 'Error: ' + (data.error || 'upload failed');
+        }
+    } catch (_) {
+        if (statusEl) statusEl.textContent = 'Upload failed.';
+    }
+    input.value = '';
 }
 
 // Load library on start. loadSettings is awaited alongside so persisted

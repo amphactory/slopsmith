@@ -334,7 +334,7 @@
                 <!-- ── Core Slopsmith settings ─────────────────────────────── -->
                 <section>
                     <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-4">Slopsmith</h3>
-                    <div class="space-y-6">
+                    <div class="admin-only-section space-y-6">
                         <div>
                             <label class="text-sm font-medium text-gray-400 mb-2 block">DLC Folder Path</label>
                             <div class="flex gap-3">
@@ -441,8 +441,68 @@
                     </div>
                 </section>
 
+                <!-- ── Profile ───────────────────────────────────────────────── -->
+                <section>
+                    <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-4">Profile</h3>
+                    <div class="space-y-6">
+                        <!-- Avatar -->
+                        <div class="flex items-center gap-5">
+                            <img id="profile-avatar-img" src="" alt="avatar"
+                                 class="w-16 h-16 rounded-full object-cover bg-dark-700 border border-gray-800 hidden">
+                            <div id="profile-avatar-placeholder"
+                                 class="w-16 h-16 rounded-full bg-dark-700 border border-gray-800 flex items-center justify-center text-gray-600 text-2xl select-none">?</div>
+                            <div class="flex flex-col gap-2">
+                                <label class="text-sm font-medium text-gray-400">Profile picture</label>
+                                <input type="file" id="profile-avatar-file" accept="image/*" class="hidden"
+                                       onchange="uploadAvatar(this)">
+                                <button onclick="document.getElementById('profile-avatar-file').click()"
+                                        class="bg-dark-600 hover:bg-dark-500 px-4 py-2 rounded-xl text-sm text-gray-300 transition">
+                                    Upload image
+                                </button>
+                                <p class="text-xs text-gray-600">Max 2 MB</p>
+                            </div>
+                        </div>
+                        <!-- Display name -->
+                        <div>
+                            <label for="profile-display-name" class="text-sm font-medium text-gray-400 mb-2 block">Display name</label>
+                            <input type="text" id="profile-display-name" maxlength="50"
+                                   placeholder="Your name (leave blank to use username)"
+                                   class="w-full bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 placeholder-gray-600 focus:border-accent/50 outline-none">
+                        </div>
+                        <!-- Role -->
+                        <div>
+                            <label for="profile-instrument" class="text-sm font-medium text-gray-400 mb-2 block">Role</label>
+                            <select id="profile-instrument"
+                                    class="w-full bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 outline-none focus:border-accent/50">
+                                <option value="">— Select your role —</option>
+                                <option value="lead">Lead Guitar</option>
+                                <option value="rhythm">Rhythm Guitar</option>
+                                <option value="bass">Bassist</option>
+                                <option value="vocals">Singer</option>
+                                <option value="drums">Drummer</option>
+                            </select>
+                        </div>
+                        <!-- Bio -->
+                        <div>
+                            <label for="profile-bio" class="text-sm font-medium text-gray-400 mb-2 block">About me</label>
+                            <textarea id="profile-bio" maxlength="150" rows="3"
+                                      placeholder="Up to 150 characters"
+                                      oninput="document.getElementById('profile-bio-count').textContent = this.value.length"
+                                      class="w-full bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 placeholder-gray-600 focus:border-accent/50 outline-none resize-none"></textarea>
+                            <p class="text-xs text-gray-600 mt-1"><span id="profile-bio-count">0</span>/150</p>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <button onclick="saveProfile()"
+                                    class="bg-accent hover:bg-accent-light px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition">
+                                Save Profile
+                            </button>
+                            <span id="profile-status" class="text-xs text-gray-500"></span>
+                        </div>
+                    </div>
+                </section>
+
                 <!-- ── Plugin settings ─────────────────────────────────────── -->
-                <section id="plugin-settings-area" class="hidden">
+                <section id="plugin-settings-area" class="hidden admin-only-section">
                     <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-4">Plugins</h3>
                     <div class="space-y-6">
                         <div>

@@ -505,6 +505,16 @@ class MetadataDB:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         """)
+        for ddl in (
+            "ALTER TABLE users ADD COLUMN display_name TEXT",
+            "ALTER TABLE users ADD COLUMN avatar_url TEXT",
+            "ALTER TABLE users ADD COLUMN instrument TEXT",
+            "ALTER TABLE users ADD COLUMN bio TEXT",
+        ):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
         self._lock = threading.Lock()
 
@@ -2667,7 +2677,7 @@ def auth_login(request: Request, data: dict):
         meta_db.conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user_id,))
         meta_db.conn.commit()
     token, is_secure = _create_session(user_id, role, username, request)
-    resp = JSONResponse({"ok": True, "role": role, "username": username})
+    resp = JSONResponse({"ok": True, "role": role, "username": username, "user_id": user_id})
     resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
     return resp
 
@@ -2707,7 +2717,7 @@ async def auth_register(request: Request, data: dict):
         meta_db.conn.commit()
         user_id = meta_db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     token, is_secure = _create_session(user_id, "user", username, request)
-    resp = JSONResponse({"ok": True, "role": "user", "username": username})
+    resp = JSONResponse({"ok": True, "role": "user", "username": username, "user_id": user_id})
     resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
     return resp
 
@@ -2815,6 +2825,96 @@ def auth_logout(request: Request):
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("slopsmith_session")
     return resp
+
+
+_VALID_INSTRUMENTS = {"lead", "rhythm", "bass", "vocals", "drums"}
+
+
+@app.get("/api/profile")
+def get_profile(request: Request):
+    session = getattr(request.state, "session", None) or {}
+    user_id = session.get("user_id")
+    if not user_id:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    row = meta_db.conn.execute(
+        "SELECT username, email, display_name, avatar_url, instrument, bio FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return JSONResponse({"error": "user not found"}, status_code=404)
+    username, email, display_name, avatar_url, instrument, bio = row
+    return {
+        "username": username,
+        "email": email or "",
+        "display_name": display_name or "",
+        "instrument": instrument or "",
+        "bio": bio or "",
+        "has_avatar": bool(avatar_url and (CONFIG_DIR / avatar_url).exists()),
+    }
+
+
+@app.post("/api/profile")
+async def save_profile(request: Request):
+    session = getattr(request.state, "session", None) or {}
+    user_id = session.get("user_id")
+    if not user_id:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    data = await request.json()
+    display_name = str(data.get("display_name", "") or "").strip()[:50]
+    instrument = str(data.get("instrument", "") or "").strip() or None
+    bio = str(data.get("bio", "") or "").strip()[:150]
+    if instrument and instrument not in _VALID_INSTRUMENTS:
+        return JSONResponse({"error": "invalid instrument"}, status_code=400)
+    with meta_db._lock:
+        meta_db.conn.execute(
+            "UPDATE users SET display_name=?, instrument=?, bio=? WHERE id=?",
+            (display_name or None, instrument, bio or None, user_id),
+        )
+        meta_db.conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/profile/avatar")
+async def upload_avatar(request: Request):
+    session = getattr(request.state, "session", None) or {}
+    user_id = session.get("user_id")
+    if not user_id:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    form = await request.form()
+    file = form.get("avatar")
+    if not file or not hasattr(file, "read"):
+        return JSONResponse({"error": "no file"}, status_code=400)
+    content_type = getattr(file, "content_type", "") or ""
+    if not content_type.startswith("image/"):
+        return JSONResponse({"error": "must be an image"}, status_code=400)
+    data = await file.read()
+    if len(data) > 2 * 1024 * 1024:
+        return JSONResponse({"error": "file too large (max 2 MB)"}, status_code=400)
+    ext_map = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}
+    ext = ext_map.get(content_type, ".jpg")
+    avatars_dir = CONFIG_DIR / "avatars"
+    avatars_dir.mkdir(exist_ok=True)
+    avatar_path = avatars_dir / f"{user_id}{ext}"
+    avatar_path.write_bytes(data)
+    rel_path = f"avatars/{user_id}{ext}"
+    with meta_db._lock:
+        meta_db.conn.execute("UPDATE users SET avatar_url=? WHERE id=?", (rel_path, user_id))
+        meta_db.conn.commit()
+    return {"ok": True, "url": f"/api/profile/avatar/{user_id}"}
+
+
+@app.get("/api/profile/avatar/{user_id}")
+def get_avatar(user_id: int):
+    from fastapi.responses import FileResponse
+    row = meta_db.conn.execute("SELECT avatar_url FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row or not row[0]:
+        return JSONResponse({"error": "no avatar"}, status_code=404)
+    avatar_path = CONFIG_DIR / row[0]
+    if not avatar_path.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ext = avatar_path.suffix.lstrip(".")
+    media_type = f"image/{ext}" if ext else "image/jpeg"
+    return FileResponse(avatar_path, media_type=media_type, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/settings")
