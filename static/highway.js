@@ -2584,6 +2584,7 @@ function createHighway() {
                                     tuning: msg.tuning,
                                     capo: msg.capo,
                                     format: msg.format,
+                                    difficulty: parseInt(document.getElementById('mastery-slider')?.value ?? '100', 10),
                                 };
                                 window.slopsmith.emit('song:loaded', window.slopsmith.currentSong);
                             }

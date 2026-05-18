@@ -1,0 +1,8 @@
+{
+    "id": "friends",
+    "name": "Friends",
+    "version": "1.0.0",
+    "bundled": true,
+    "script": "friends.js",
+    "routes": "routes.py"
+}

@@ -3071,6 +3071,7 @@ function _songEventPayload() {
         audioT,
         chartT: highway.getTime(),
         perfNow: performance.now(),
+        difficulty: parseInt(document.getElementById('mastery-slider')?.value ?? '100', 10),
     };
 }
 // Serializes seeks so concurrent callers (e.g. user ⏪ during a loop wrap)
@@ -3503,6 +3504,7 @@ function setMastery(v) {
     document.getElementById('mastery-label').textContent = pct + '%';
     highway.setMastery(pct / 100);
     _persistMastery(pct);
+    if (window.slopsmith) window.slopsmith.emit('song:mastery-changed', { difficulty: pct });
 }
 // Reflect phrase-data availability on the slider after every `ready`.
 // The server omits the `phrases` message entirely for single-level
