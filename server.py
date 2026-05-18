@@ -10,6 +10,8 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
+import dotenv
+dotenv.load_dotenv()
 
 from logging_setup import configure_logging
 configure_logging()
@@ -19,7 +21,7 @@ log = logging.getLogger("slopsmith.server")
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from psarc import unpack_psarc, read_psarc_entries
 from song import (
@@ -56,10 +58,20 @@ from fastapi import Request
 app = FastAPI(title="Rocksmith Web")
 
 # ── Auth session state ────────────────────────────────────────────────────────
-_SESSIONS: dict[str, str] = {}          # token → role ('admin' | 'guest')
+_SESSIONS: dict[str, dict] = {}  # token → {user_id, role, username}
 _LOGIN_FAILURES: dict[str, tuple[int, float]] = {}  # ip → (count, window_start)
-_LOGIN_FAILURE_WINDOW = 60              # seconds
+_LOGIN_FAILURE_WINDOW = 60
 _LOGIN_MAX_ATTEMPTS = 5
+_REGISTER_ATTEMPTS: dict[str, tuple[int, float]] = {}  # ip → (count, window_start)
+_REGISTER_MAX_ATTEMPTS = 3
+_REGISTER_WINDOW = 3600  # 1 hour
+_GOOGLE_STATES: dict[str, float] = {}  # CSRF state → timestamp
+_GOOGLE_STATE_TTL = 300  # 5 minutes
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+TURNSTILE_SITE_KEY = os.environ.get("TURNSTILE_SITE_KEY", "")
+TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY", "")
 
 
 def _scrypt_hash(password: str) -> str:
@@ -101,12 +113,49 @@ def _record_failure(ip: str) -> None:
     _LOGIN_FAILURES[ip] = (count + 1 if now - since < _LOGIN_FAILURE_WINDOW else 1, since if now - since < _LOGIN_FAILURE_WINDOW else now)
 
 
-def _create_session(role: str, request) -> tuple[str, bool]:
+def _register_rate_limited(ip: str) -> bool:
+    now = time.time()
+    if ip in _REGISTER_ATTEMPTS:
+        count, since = _REGISTER_ATTEMPTS[ip]
+        if now - since < _REGISTER_WINDOW:
+            return count >= _REGISTER_MAX_ATTEMPTS
+        del _REGISTER_ATTEMPTS[ip]
+    return False
+
+
+def _record_register_attempt(ip: str) -> None:
+    now = time.time()
+    count, since = _REGISTER_ATTEMPTS.get(ip, (0, now))
+    _REGISTER_ATTEMPTS[ip] = (count + 1 if now - since < _REGISTER_WINDOW else 1, since if now - since < _REGISTER_WINDOW else now)
+
+
+def _create_session(user_id: int, role: str, username: str, request) -> tuple[str, bool]:
     token = secrets.token_urlsafe(32)
-    _SESSIONS[token] = role
+    _SESSIONS[token] = {"user_id": user_id, "role": role, "username": username}
     proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
     is_secure = request.url.scheme == "https" or proto.lower() == "https"
     return token, is_secure
+
+
+async def _verify_turnstile(token: str, ip: str) -> bool:
+    if not TURNSTILE_SECRET_KEY:
+        return True
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={"secret": TURNSTILE_SECRET_KEY, "response": token, "remoteip": ip},
+                timeout=5.0,
+            )
+            return resp.json().get("success", False)
+    except Exception:
+        return False
+
+
+def _sanitize_google_username(name: str) -> str:
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)[:32].strip('_')
+    return sanitized or "user"
 
 
 # Plugins that maintain session stores can register a cleanup callback here.
@@ -265,37 +314,81 @@ async def _demo_mode_guard(request: Request, call_next):
     return await call_next(request)
 
 
+_ADMIN_ONLY: list[tuple[str, re.Pattern]] = [
+    ("POST",   re.compile(r"^/api/settings$")),
+    ("POST",   re.compile(r"^/api/settings/import$")),
+    ("POST",   re.compile(r"^/api/rescan$")),
+    ("POST",   re.compile(r"^/api/rescan/full$")),
+    ("POST",   re.compile(r"^/api/songs/upload$")),
+    ("DELETE", re.compile(r"^/api/song/.+$")),
+    ("POST",   re.compile(r"^/api/song/.*/meta$")),
+    ("POST",   re.compile(r"^/api/song/.*/art/upload$")),
+    ("GET",    re.compile(r"^/api/plugins/updates$")),
+    ("POST",   re.compile(r"^/api/plugins/[^/]+/update$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/save$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/build$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/upload-art$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/upload-audio$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/youtube-audio$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/import-gp$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/import-midi$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_karaoke/align$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_karaoke/generate-pitch$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_karaoke/save-lyrics$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_sync/align$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_sync/save$")),
+    ("POST",   re.compile(r"^/api/plugins/studio/sessions/[^/]+/extract-drums$")),
+    ("POST",   re.compile(r"^/api/diagnostics/export$")),
+    ("GET",    re.compile(r"^/api/diagnostics/preview$")),
+    ("GET",    re.compile(r"^/api/diagnostics/hardware$")),
+    ("POST",   re.compile(r"^/api/plugins/highway_3d/files$")),
+    ("DELETE", re.compile(r"^/api/plugins/highway_3d/files$")),
+]
+
 _AUTH_EXEMPT_EXACT = {
     ("POST", "/api/auth/login"),
     ("GET",  "/api/auth/config"),
     ("GET",  "/api/auth/session"),
-    ("POST", "/api/auth/guest"),
+    ("POST", "/api/auth/register"),
     ("POST", "/api/auth/logout"),
+    ("GET",  "/api/auth/google"),
+    ("GET",  "/api/auth/google/callback"),
 }
 
 
 @app.middleware("http")
 async def _auth_guard(request: Request, call_next):
-    cfg = _load_config(CONFIG_DIR / "config.json") or {}
-    if not cfg.get("admin_password_hash"):
-        return await call_next(request)
-
     path = request.url.path
     method = request.method
 
     if (method, path) in _AUTH_EXEMPT_EXACT or path == "/" or path.startswith("/static/"):
         return await call_next(request)
 
-    token = request.cookies.get("slopsmith_session", "")
-    role = _SESSIONS.get(token)
+    # If admin has no credentials configured, auto-attach admin session (open instance)
+    try:
+        admin = meta_db.conn.execute(
+            "SELECT id, username, password_hash, google_id FROM users WHERE role='admin' LIMIT 1"
+        ).fetchone()
+    except Exception:
+        admin = None
 
-    if not role:
+    if not admin or not (admin[2] or admin[3]):
+        if admin:
+            request.state.session = {"user_id": admin[0], "role": "admin", "username": admin[1]}
+        return await call_next(request)
+
+    token = request.cookies.get("slopsmith_session", "")
+    session = _SESSIONS.get(token)
+
+    if not session:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    if role == "guest":
-        for blocked_method, pattern in _DEMO_BLOCKED:
-            if method == blocked_method and pattern.match(path):
-                return JSONResponse({"error": "guests cannot perform this action"}, status_code=403)
+    request.state.session = session
+
+    if session.get("role") != "admin":
+        for admin_method, pattern in _ADMIN_ONLY:
+            if method == admin_method and pattern.match(path):
+                return JSONResponse({"error": "admin access required"}, status_code=403)
 
     return await call_next(request)
 
@@ -392,26 +485,59 @@ class MetadataDB:
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE,
+                password_hash TEXT,
+                google_id TEXT UNIQUE,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_login TEXT
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS favorites_v2 (
+                user_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                PRIMARY KEY (user_id, filename),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
         self.conn.commit()
         self._lock = threading.Lock()
 
-    def is_favorite(self, filename: str) -> bool:
-        return self.conn.execute("SELECT 1 FROM favorites WHERE filename = ?", (filename,)).fetchone() is not None
+    def is_favorite(self, user_id: int, filename: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM favorites_v2 WHERE user_id = ? AND filename = ?",
+            (user_id, filename)
+        ).fetchone() is not None
 
-    def toggle_favorite(self, filename: str) -> bool:
-        """Toggle favorite status. Returns new state."""
+    def toggle_favorite(self, user_id: int, filename: str) -> bool:
+        """Toggle favorite status for a user. Returns new state."""
         with self._lock:
-            if self.is_favorite(filename):
-                self.conn.execute("DELETE FROM favorites WHERE filename = ?", (filename,))
+            if self.is_favorite(user_id, filename):
+                self.conn.execute(
+                    "DELETE FROM favorites_v2 WHERE user_id = ? AND filename = ?",
+                    (user_id, filename)
+                )
                 self.conn.commit()
                 return False
             else:
-                self.conn.execute("INSERT OR IGNORE INTO favorites VALUES (?)", (filename,))
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO favorites_v2 (user_id, filename) VALUES (?, ?)",
+                    (user_id, filename)
+                )
                 self.conn.commit()
                 return True
 
-    def favorite_set(self) -> set[str]:
-        return {r[0] for r in self.conn.execute("SELECT filename FROM favorites").fetchall()}
+    def favorite_set(self, user_id: int | None = None) -> set[str]:
+        if user_id is None:
+            return set()
+        return {r[0] for r in self.conn.execute(
+            "SELECT filename FROM favorites_v2 WHERE user_id = ?", (user_id,)
+        ).fetchall()}
 
     def get(self, filename: str, mtime: float, size: int) -> dict | None:
         row = self.conn.execute(
@@ -489,6 +615,7 @@ class MetadataDB:
     _ALLOWED_STEM_IDS = {"full", "guitar", "bass", "drums", "vocals", "piano", "other"}
 
     def _build_where(self, q: str = "", favorites_only: bool = False,
+                     user_id: int | None = None,
                      format_filter: str = "",
                      arrangements_has: list[str] | None = None,
                      arrangements_lacks: list[str] | None = None,
@@ -503,7 +630,11 @@ class MetadataDB:
         where = "WHERE title != ''"
         params: list = []
         if favorites_only:
-            where += " AND filename IN (SELECT filename FROM favorites)"
+            if user_id is not None:
+                where += " AND filename IN (SELECT filename FROM favorites_v2 WHERE user_id = ?)"
+                params.append(user_id)
+            else:
+                where += " AND 1=0"  # no user → no favorites
         if format_filter:
             where += " AND format = ?"
             params.append(format_filter)
@@ -555,6 +686,7 @@ class MetadataDB:
     def query_page(self, q: str = "", page: int = 0, size: int = 24,
                    sort: str = "artist", direction: str = "asc",
                    favorites_only: bool = False,
+                   user_id: int | None = None,
                    format_filter: str = "",
                    arrangements_has: list[str] | None = None,
                    arrangements_lacks: list[str] | None = None,
@@ -564,7 +696,7 @@ class MetadataDB:
                    tunings: list[str] | None = None) -> tuple[list[dict], int]:
         """Server-side paginated search. Returns (songs, total_count)."""
         where, params = self._build_where(
-            q=q, favorites_only=favorites_only, format_filter=format_filter,
+            q=q, favorites_only=favorites_only, user_id=user_id, format_filter=format_filter,
             arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
             stems_has=stems_has, stems_lacks=stems_lacks,
             has_lyrics=has_lyrics, tunings=tunings,
@@ -629,7 +761,7 @@ class MetadataDB:
         ).fetchall()
 
         estd = self._estd_set()
-        favs = self.favorite_set()
+        favs = self.favorite_set(user_id)
         songs = []
         for r in rows:
             songs.append({
@@ -647,6 +779,7 @@ class MetadataDB:
 
     def query_artists(self, letter: str = "", q: str = "",
                       favorites_only: bool = False,
+                      user_id: int | None = None,
                       page: int = 0, size: int = 50,
                       format_filter: str = "",
                       arrangements_has: list[str] | None = None,
@@ -657,7 +790,7 @@ class MetadataDB:
                       tunings: list[str] | None = None) -> tuple[list[dict], int]:
         """Get artists grouped by letter with their albums and songs. Returns (artists, total_artists)."""
         where, params = self._build_where(
-            q=q, favorites_only=favorites_only, format_filter=format_filter,
+            q=q, favorites_only=favorites_only, user_id=user_id, format_filter=format_filter,
             arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
             stems_has=stems_has, stems_lacks=stems_lacks,
             has_lyrics=has_lyrics, tunings=tunings,
@@ -697,7 +830,7 @@ class MetadataDB:
         # Group into artist -> album -> songs
         from collections import OrderedDict
         estd = self._estd_set()
-        favs = self.favorite_set()
+        favs = self.favorite_set(user_id)
         artists = OrderedDict()
         for r in rows:
             artist = r[2] or "Unknown Artist"
@@ -732,6 +865,7 @@ class MetadataDB:
         return result, total_artists
 
     def query_stats(self, favorites_only: bool = False,
+                    user_id: int | None = None,
                     q: str = "", format_filter: str = "",
                     arrangements_has: list[str] | None = None,
                     arrangements_lacks: list[str] | None = None,
@@ -743,7 +877,7 @@ class MetadataDB:
         params as query_page so the letter counts stay synchronized
         with the grid when filters are active."""
         where, params = self._build_where(
-            q=q, favorites_only=favorites_only, format_filter=format_filter,
+            q=q, favorites_only=favorites_only, user_id=user_id, format_filter=format_filter,
             arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
             stems_has=stems_has, stems_lacks=stems_lacks,
             has_lyrics=has_lyrics, tunings=tunings,
@@ -771,6 +905,41 @@ class MetadataDB:
 
 
 meta_db = MetadataDB()
+
+
+def _migrate_auth():
+    """One-time migration: seed admin user from config.json admin_password_hash,
+    and move global favorites into favorites_v2 under admin's user_id."""
+    with meta_db._lock:
+        count = meta_db.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count > 0:
+            return  # Already migrated
+        # Inline config read to avoid forward-reference to _load_config
+        pw_hash = None
+        config_file = CONFIG_DIR / "config.json"
+        if config_file.exists():
+            try:
+                cfg = json.loads(config_file.read_text())
+                if isinstance(cfg, dict):
+                    pw_hash = cfg.get("admin_password_hash")
+            except Exception:
+                pass
+        meta_db.conn.execute(
+            "INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
+            ("admin", None, pw_hash, "admin")
+        )
+        admin_id = meta_db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        old_favs = meta_db.conn.execute("SELECT filename FROM favorites").fetchall()
+        if old_favs:
+            meta_db.conn.executemany(
+                "INSERT OR IGNORE INTO favorites_v2 (user_id, filename) VALUES (?, ?)",
+                [(admin_id, row[0]) for row in old_favs]
+            )
+        meta_db.conn.commit()
+        log.info("auth migration: created admin user (id=%d), migrated %d favorites", admin_id, len(old_favs))
+
+
+_migrate_auth()
 
 
 def _get_dlc_dir(cfg: dict | None = None) -> Path | None:
@@ -2260,17 +2429,19 @@ def _parse_has_lyrics(raw: str) -> int | None:
 
 
 @app.get("/api/library")
-def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist",
+def list_library(request: Request, q: str = "", page: int = 0, size: int = 24, sort: str = "artist",
                  dir: str = "asc", favorites: int = 0, format: str = "",
                  arrangements_has: str = "", arrangements_lacks: str = "",
                  stems_has: str = "", stems_lacks: str = "",
                  has_lyrics: str = "", tunings: str = ""):
     """Paginated library search, queried from SQLite."""
+    session = getattr(request.state, 'session', None) or {}
+    user_id = session.get('user_id')
     size = min(size, 100)
     fmt = format if format in ("psarc", "sloppak", "loose") else ""
     songs, total = meta_db.query_page(
         q=q, page=page, size=size, sort=sort,
-        direction=dir, favorites_only=bool(favorites), format_filter=fmt,
+        direction=dir, favorites_only=bool(favorites), user_id=user_id, format_filter=fmt,
         arrangements_has=_split_csv(arrangements_has),
         arrangements_lacks=_split_csv(arrangements_lacks),
         stems_has=_split_csv(stems_has),
@@ -2282,15 +2453,18 @@ def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist
 
 
 @app.get("/api/library/artists")
-def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 0, size: int = 50,
+def list_artists(request: Request, letter: str = "", q: str = "", favorites: int = 0,
+                 page: int = 0, size: int = 50,
                  format: str = "",
                  arrangements_has: str = "", arrangements_lacks: str = "",
                  stems_has: str = "", stems_lacks: str = "",
                  has_lyrics: str = "", tunings: str = ""):
     """Get artists grouped by letter with albums and songs (for tree view)."""
+    session = getattr(request.state, 'session', None) or {}
+    user_id = session.get('user_id')
     fmt = format if format in ("psarc", "sloppak", "loose") else ""
     artists, total = meta_db.query_artists(
-        letter=letter, q=q, favorites_only=bool(favorites),
+        letter=letter, q=q, favorites_only=bool(favorites), user_id=user_id,
         page=page, size=min(size, 100), format_filter=fmt,
         arrangements_has=_split_csv(arrangements_has),
         arrangements_lacks=_split_csv(arrangements_lacks),
@@ -2303,15 +2477,17 @@ def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 
 
 
 @app.get("/api/library/stats")
-def library_stats(favorites: int = 0, q: str = "", format: str = "",
+def library_stats(request: Request, favorites: int = 0, q: str = "", format: str = "",
                   arrangements_has: str = "", arrangements_lacks: str = "",
                   stems_has: str = "", stems_lacks: str = "",
                   has_lyrics: str = "", tunings: str = ""):
     """Aggregate stats for the UI. Accepts the same filter params as
     /api/library so the letter bar mirrors the active grid filter set."""
+    session = getattr(request.state, 'session', None) or {}
+    user_id = session.get('user_id')
     fmt = format if format in ("psarc", "sloppak", "loose") else ""
     return meta_db.query_stats(
-        favorites_only=bool(favorites), q=q, format_filter=fmt,
+        favorites_only=bool(favorites), user_id=user_id, q=q, format_filter=fmt,
         arrangements_has=_split_csv(arrangements_has),
         arrangements_lacks=_split_csv(arrangements_lacks),
         stems_has=_split_csv(stems_has),
@@ -2354,12 +2530,16 @@ def list_tuning_names():
 
 
 @app.post("/api/favorites/toggle")
-def toggle_favorite(data: dict):
-    """Toggle a song's favorite status."""
+def toggle_favorite(request: Request, data: dict):
+    """Toggle a song's favorite status for the current user."""
+    session = getattr(request.state, 'session', None) or {}
+    user_id = session.get('user_id')
+    if not user_id:
+        return JSONResponse({"error": "not logged in"}, status_code=401)
     filename = data.get("filename", "")
     if not filename:
         return {"error": "No filename"}
-    new_state = meta_db.toggle_favorite(filename)
+    new_state = meta_db.toggle_favorite(user_id, filename)
     return {"favorite": new_state}
 
 
@@ -2439,15 +2619,30 @@ def _load_config(config_file):
 
 @app.get("/api/auth/config")
 def get_auth_config():
-    cfg = _load_config(CONFIG_DIR / "config.json") or {}
-    return {"password_set": bool(cfg.get("admin_password_hash"))}
+    try:
+        admin = meta_db.conn.execute(
+            "SELECT password_hash, google_id FROM users WHERE role='admin' LIMIT 1"
+        ).fetchone()
+        auth_required = bool(admin and (admin[0] or admin[1]))
+    except Exception:
+        auth_required = False
+    return {
+        "auth_required": auth_required,
+        "google_enabled": bool(GOOGLE_CLIENT_ID),
+        "turnstile_site_key": TURNSTILE_SITE_KEY or None,
+    }
 
 
 @app.get("/api/auth/session")
 def auth_session(request: Request):
     token = request.cookies.get("slopsmith_session", "")
-    role = _SESSIONS.get(token)
-    return {"ok": bool(role), "role": role}
+    session = _SESSIONS.get(token)
+    if not session:
+        # Check if auto-session was injected by middleware
+        session = getattr(request.state, 'session', None)
+    if session:
+        return {"ok": True, "role": session.get("role"), "username": session.get("username"), "user_id": session.get("user_id")}
+    return {"ok": False}
 
 
 @app.post("/api/auth/login")
@@ -2455,28 +2650,160 @@ def auth_login(request: Request, data: dict):
     ip = _client_ip(request)
     if _rate_limited(ip):
         return JSONResponse({"ok": False, "error": "too many attempts"}, status_code=429)
+    username = data.get("username", "").strip()
     password = data.get("password", "")
-    if not isinstance(password, str):
+    if not isinstance(username, str) or not isinstance(password, str):
         return JSONResponse({"ok": False}, status_code=400)
-    cfg = _load_config(CONFIG_DIR / "config.json") or {}
-    stored_hash = cfg.get("admin_password_hash", "")
-    if stored_hash and not _scrypt_verify(password, stored_hash):
+    row = meta_db.conn.execute(
+        "SELECT id, username, password_hash, role FROM users WHERE username = ? COLLATE NOCASE",
+        (username,)
+    ).fetchone()
+    if not row or not row[2] or not _scrypt_verify(password, row[2]):
         _record_failure(ip)
         return {"ok": False}
     _LOGIN_FAILURES.pop(ip, None)
-    token, is_secure = _create_session("admin", request)
-    resp = JSONResponse({"ok": True, "role": "admin"})
+    user_id, username, _, role = row
+    with meta_db._lock:
+        meta_db.conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user_id,))
+        meta_db.conn.commit()
+    token, is_secure = _create_session(user_id, role, username, request)
+    resp = JSONResponse({"ok": True, "role": role, "username": username})
     resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
     return resp
 
 
-@app.post("/api/auth/guest")
-def auth_guest(request: Request):
-    cfg = _load_config(CONFIG_DIR / "config.json") or {}
-    if not cfg.get("admin_password_hash"):
-        return JSONResponse({"error": "no password configured"}, status_code=400)
-    token, is_secure = _create_session("guest", request)
-    resp = JSONResponse({"ok": True, "role": "guest"})
+@app.post("/api/auth/register")
+async def auth_register(request: Request, data: dict):
+    ip = _client_ip(request)
+    if _register_rate_limited(ip):
+        return JSONResponse({"ok": False, "error": "too many registrations, try later"}, status_code=429)
+    _record_register_attempt(ip)
+    username = data.get("username", "").strip()
+    email = data.get("email", "").strip()
+    password = data.get("password", "")
+    turnstile_token = data.get("turnstile_token", "")
+    if not re.match(r'^[a-zA-Z0-9_-]{3,32}$', username):
+        return JSONResponse({"ok": False, "error": "Username must be 3-32 chars (letters, numbers, _ or -)"}, status_code=400)
+    if not isinstance(password, str) or len(password) < 8:
+        return JSONResponse({"ok": False, "error": "Password must be at least 8 characters"}, status_code=400)
+    if email and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        return JSONResponse({"ok": False, "error": "Invalid email address"}, status_code=400)
+    if TURNSTILE_SECRET_KEY and not await _verify_turnstile(turnstile_token, ip):
+        return JSONResponse({"ok": False, "error": "Bot check failed, please try again"}, status_code=400)
+    with meta_db._lock:
+        if meta_db.conn.execute(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone():
+            return JSONResponse({"ok": False, "error": "Username already taken"}, status_code=409)
+        if email and meta_db.conn.execute(
+            "SELECT id FROM users WHERE email = ? COLLATE NOCASE", (email,)
+        ).fetchone():
+            return JSONResponse({"ok": False, "error": "Email already registered"}, status_code=409)
+        pw_hash = _scrypt_hash(password)
+        meta_db.conn.execute(
+            "INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
+            (username, email or None, pw_hash, "user")
+        )
+        meta_db.conn.commit()
+        user_id = meta_db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    token, is_secure = _create_session(user_id, "user", username, request)
+    resp = JSONResponse({"ok": True, "role": "user", "username": username})
+    resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
+    return resp
+
+
+@app.get("/api/auth/google")
+def auth_google(request: Request):
+    if not GOOGLE_CLIENT_ID:
+        return JSONResponse({"error": "Google SSO not configured"}, status_code=400)
+    state = secrets.token_urlsafe(16)
+    now = time.time()
+    _GOOGLE_STATES[state] = now
+    for k in [k for k, v in list(_GOOGLE_STATES.items()) if now - v > _GOOGLE_STATE_TTL]:
+        del _GOOGLE_STATES[k]
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    scheme = "https" if (request.url.scheme == "https" or proto.lower() == "https") else "http"
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    redirect_uri = f"{scheme}://{host}/api/auth/google/callback"
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+    })
+    return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
+
+
+@app.get("/api/auth/google/callback")
+async def auth_google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error or not code or not state:
+        return RedirectResponse("/?auth_error=oauth_failed")
+    now = time.time()
+    if state not in _GOOGLE_STATES or now - _GOOGLE_STATES.get(state, 0) > _GOOGLE_STATE_TTL:
+        return RedirectResponse("/?auth_error=invalid_state")
+    del _GOOGLE_STATES[state]
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    scheme = "https" if (request.url.scheme == "https" or proto.lower() == "https") else "http"
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    redirect_uri = f"{scheme}://{host}/api/auth/google/callback"
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            token_resp = await client.post("https://oauth2.googleapis.com/token", data={
+                "code": code, "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+            }, timeout=10.0)
+            access_token = token_resp.json().get("access_token")
+            if not access_token:
+                return RedirectResponse("/?auth_error=token_exchange_failed")
+            userinfo = (await client.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"}, timeout=10.0
+            )).json()
+    except Exception:
+        return RedirectResponse("/?auth_error=oauth_failed")
+    google_id = userinfo.get("sub")
+    email = userinfo.get("email", "")
+    name = userinfo.get("name", "") or userinfo.get("given_name", "")
+    if not google_id:
+        return RedirectResponse("/?auth_error=no_google_id")
+    with meta_db._lock:
+        row = meta_db.conn.execute(
+            "SELECT id, username, role FROM users WHERE google_id = ?", (google_id,)
+        ).fetchone()
+        if not row and email:
+            row = meta_db.conn.execute(
+                "SELECT id, username, role FROM users WHERE email = ? COLLATE NOCASE", (email,)
+            ).fetchone()
+            if row:
+                meta_db.conn.execute("UPDATE users SET google_id = ? WHERE id = ?", (google_id, row[0]))
+                meta_db.conn.commit()
+        if not row:
+            base = _sanitize_google_username(name or email.split("@")[0])
+            uname = base
+            suffix = 1
+            while meta_db.conn.execute(
+                "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (uname,)
+            ).fetchone():
+                uname = f"{base}{suffix}"
+                suffix += 1
+            meta_db.conn.execute(
+                "INSERT INTO users (username, email, google_id, role) VALUES (?, ?, ?, ?)",
+                (uname, email or None, google_id, "user")
+            )
+            meta_db.conn.commit()
+            user_id = meta_db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            username, role = uname, "user"
+        else:
+            user_id, username, role = row[0], row[1], row[2]
+        meta_db.conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user_id,))
+        meta_db.conn.commit()
+    token, is_secure = _create_session(user_id, role, username, request)
+    resp = RedirectResponse("/")
     resp.set_cookie("slopsmith_session", token, httponly=True, samesite="lax", secure=is_secure, max_age=86400 * 30)
     return resp
 
@@ -2491,16 +2818,22 @@ def auth_logout(request: Request):
 
 
 @app.get("/api/settings")
-def get_settings():
+def get_settings(request: Request):
     cfg = _load_config(CONFIG_DIR / "config.json")
     result = dict(cfg) if cfg is not None else _default_settings()
     result.pop("admin_password_hash", None)
-    result["password_set"] = bool(cfg and cfg.get("admin_password_hash"))
+    session = getattr(request.state, 'session', None) or {}
+    user_id = session.get('user_id')
+    if user_id:
+        row = meta_db.conn.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
+        result["password_set"] = bool(row and row[0])
+    else:
+        result["password_set"] = False
     return result
 
 
 @app.post("/api/settings")
-def save_settings(data: dict):
+def save_settings(request: Request, data: dict):
     # Partial-update: merge only keys present in the request body so
     # single-key POSTs (like the difficulty slider's oninput) don't
     # clobber unrelated settings on disk.
@@ -2599,11 +2932,22 @@ def save_settings(data: dict):
         pw = data["admin_password"]
         if not isinstance(pw, str):
             return {"error": "admin_password must be a string"}
+        session = getattr(request.state, 'session', None) or {}
+        user_id = session.get('user_id')
+        if not user_id:
+            return JSONResponse({"error": "not logged in"}, status_code=401)
         if pw:
-            cfg["admin_password_hash"] = _scrypt_hash(pw)
+            new_hash = _scrypt_hash(pw)
+            with meta_db._lock:
+                meta_db.conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+                meta_db.conn.commit()
         else:
-            cfg.pop("admin_password_hash", None)
-        _SESSIONS.clear()  # force re-login after password change
+            with meta_db._lock:
+                meta_db.conn.execute("UPDATE users SET password_hash = NULL WHERE id = ?", (user_id,))
+                meta_db.conn.commit()
+        # Invalidate all sessions for this user so they must re-login with new password
+        for token in [t for t, s in list(_SESSIONS.items()) if s.get('user_id') == user_id]:
+            _SESSIONS.pop(token, None)
 
     config_file.write_text(json.dumps(cfg, indent=2))
     return {"message": ". ".join(messages) if messages else "Settings saved"}

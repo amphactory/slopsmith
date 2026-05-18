@@ -863,7 +863,7 @@ document.addEventListener('keydown', (e) => {
 
 // ── Screen Navigation ─────────────────────────────────────────────────────
 async function showScreen(id) {
-    if (id === 'settings' && _isGuest()) return;
+    if (id === 'settings' && !_isAdmin()) return;
     // Capture the previous screen before changing active classes
     const prevScreenId = document.querySelector('.screen.active')?.id;
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -1802,7 +1802,7 @@ function heartBtn(filename, isFav) {
 }
 
 function editBtn(song) {
-    if (_isGuest()) return '';
+    if (!_isAdmin()) return '';
     return `<button data-edit='${JSON.stringify({f:song.filename,t:song.title||'',a:song.artist||'',al:song.album||'',y:song.year||''}).replace(/'/g,"&#39;")}' class="edit-btn text-gray-600 hover:text-accent-light transition" title="Edit metadata"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg></button>`;
 }
 
@@ -2449,7 +2449,7 @@ async function exportDiagnostics() {
 }
 
 async function uploadSongs(fileList) {
-    if (_isGuest()) return;
+    if (!_isAdmin()) return;
     if (!fileList || fileList.length === 0) return;
     const all = Array.from(fileList);
     // Optional UI element — only present when on the Settings screen.
@@ -4930,7 +4930,7 @@ registerShortcut({
 
 // ── Edit metadata modal ─────────────────────────────────────────────────
 function openEditModal(songData, openerEl) {
-    if (_isGuest()) return;
+    if (!_isAdmin()) return;
     const artUrl = `/api/song/${encodeURIComponent(songData.f)}/art?t=${Date.now()}`;
     const modal = document.createElement('div');
     modal.id = 'edit-modal';
@@ -5791,9 +5791,10 @@ async function bootstrapPluginsAndUi() {
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 let _loginResolve = null;
+let _authConfig = {};
 
 function _authRole() { return sessionStorage.getItem('slopsmith_role'); }
-function _isGuest() { return _authRole() === 'guest'; }
+function _isAdmin() { return _authRole() === 'admin'; }
 
 function _setNavVisible(visible) {
     const links = document.getElementById('nav-links');
@@ -5803,14 +5804,26 @@ function _setNavVisible(visible) {
 }
 
 function _applyAuthUi() {
-    const guest = _isGuest();
+    const admin = _isAdmin();
     _setNavVisible(true);
-    document.querySelectorAll('.nav-upload').forEach(el => el.classList.toggle('hidden', guest));
-    document.querySelectorAll('.nav-settings').forEach(el => el.classList.toggle('hidden', guest));
+    document.querySelectorAll('.nav-upload').forEach(el => el.classList.toggle('hidden', !admin));
+    document.querySelectorAll('.nav-settings').forEach(el => el.classList.toggle('hidden', !admin));
     document.querySelectorAll('.nav-logout').forEach(el => el.classList.remove('hidden'));
 }
 
 async function _initAuth() {
+    // Show error if Google OAuth redirected back with error
+    const urlParams = new URLSearchParams(window.location.search);
+    const authError = urlParams.get('auth_error');
+    if (authError) {
+        window.history.replaceState({}, '', '/');
+    }
+
+    try {
+        const res = await fetch('/api/auth/config');
+        if (res.ok) _authConfig = await res.json();
+    } catch (_) {}
+
     // Resume existing server session (httpOnly cookie sent automatically)
     try {
         const res = await fetch('/api/auth/session');
@@ -5818,58 +5831,94 @@ async function _initAuth() {
             const d = await res.json();
             if (d.ok) {
                 sessionStorage.setItem('slopsmith_role', d.role);
+                sessionStorage.setItem('slopsmith_username', d.username || '');
                 _applyAuthUi();
                 return;
             }
         }
     } catch (_) {}
 
-    // No valid session — check if password protection is enabled
-    let passwordSet = false;
-    try {
-        const res = await fetch('/api/auth/config');
-        if (res.ok) { const d = await res.json(); passwordSet = d.password_set; }
-    } catch (_) {}
-
-    if (!passwordSet) {
-        // No password configured — auto-login as admin
-        try {
-            const res = await fetch('/api/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: '' }),
-            });
-            if (res.ok) {
-                const d = await res.json();
-                sessionStorage.setItem('slopsmith_role', d.role || 'admin');
-            }
-        } catch (_) {}
+    if (!_authConfig.auth_required) {
+        // Open instance — server attaches admin session automatically
+        sessionStorage.setItem('slopsmith_role', 'admin');
         _applyAuthUi();
         return;
     }
 
-    // Show login screen, hide navbar
-    _setNavVisible(false);
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    const loginEl = document.getElementById('login');
-    if (loginEl) loginEl.classList.add('active');
+    _showLoginScreen();
+    if (authError) {
+        const errEl = document.getElementById('login-error');
+        if (errEl) {
+            errEl.textContent = authError === 'oauth_failed' ? 'Google sign-in failed.' :
+                                authError === 'invalid_state' ? 'Sign-in session expired, try again.' :
+                                'Sign-in failed, please try again.';
+            errEl.classList.remove('hidden');
+        }
+    }
     await new Promise(resolve => { _loginResolve = resolve; });
     _applyAuthUi();
     await showScreen('home');
 }
 
+function _showLoginScreen() {
+    _setNavVisible(false);
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const loginEl = document.getElementById('login');
+    if (loginEl) loginEl.classList.add('active');
+    // Show/hide Google button based on config
+    if (_authConfig.google_enabled) {
+        document.querySelectorAll('.login-google-divider, .login-google-btn').forEach(el => el.classList.remove('hidden'));
+    }
+    // Load Turnstile script if needed (for register screen)
+    if (_authConfig.turnstile_site_key && !document.getElementById('cf-turnstile-script')) {
+        const s = document.createElement('script');
+        s.id = 'cf-turnstile-script';
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        s.async = true; s.defer = true;
+        document.head.appendChild(s);
+    }
+}
+
+function showLogin() {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const loginEl = document.getElementById('login');
+    if (loginEl) loginEl.classList.add('active');
+    if (_authConfig.google_enabled) {
+        document.querySelectorAll('.login-google-divider, .login-google-btn').forEach(el => el.classList.remove('hidden'));
+    }
+}
+
+function showRegister() {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const el = document.getElementById('register');
+    if (el) el.classList.add('active');
+    // Inject Turnstile widget if configured
+    const container = document.getElementById('reg-turnstile-container');
+    if (container && _authConfig.turnstile_site_key && !container.querySelector('.cf-turnstile')) {
+        const div = document.createElement('div');
+        div.className = 'cf-turnstile';
+        div.dataset.sitekey = _authConfig.turnstile_site_key;
+        div.dataset.theme = 'dark';
+        container.appendChild(div);
+        if (window.turnstile) window.turnstile.render(div);
+    }
+}
+
 async function loginWithPassword() {
+    const unEl = document.getElementById('login-username');
     const pwEl = document.getElementById('login-password');
     const errEl = document.getElementById('login-error');
     const btn = document.getElementById('btn-login');
+    const un = unEl ? unEl.value.trim() : '';
     const pw = pwEl ? pwEl.value : '';
     if (errEl) errEl.classList.add('hidden');
+    if (!un) { if (errEl) { errEl.textContent = 'Enter your username.'; errEl.classList.remove('hidden'); } return; }
     if (btn) { btn.disabled = true; btn.textContent = 'Checking...'; }
     try {
         const res = await fetch('/api/auth/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: pw }),
+            body: JSON.stringify({ username: un, password: pw }),
         });
         if (res.status === 429) {
             if (errEl) { errEl.textContent = 'Too many attempts. Wait a minute.'; errEl.classList.remove('hidden'); }
@@ -5877,10 +5926,11 @@ async function loginWithPassword() {
         }
         const data = await res.json();
         if (data.ok) {
-            sessionStorage.setItem('slopsmith_role', data.role || 'admin');
+            sessionStorage.setItem('slopsmith_role', data.role || 'user');
+            sessionStorage.setItem('slopsmith_username', data.username || un);
             if (_loginResolve) { _loginResolve(); _loginResolve = null; }
         } else {
-            if (errEl) { errEl.textContent = 'Incorrect password.'; errEl.classList.remove('hidden'); }
+            if (errEl) { errEl.textContent = 'Incorrect username or password.'; errEl.classList.remove('hidden'); }
             if (pwEl) { pwEl.value = ''; pwEl.focus(); }
         }
     } catch (e) {
@@ -5890,19 +5940,52 @@ async function loginWithPassword() {
     }
 }
 
-async function loginAsGuest() {
+function loginWithGoogle() {
+    window.location.href = '/api/auth/google';
+}
+
+async function registerUser() {
+    const errEl = document.getElementById('reg-error');
+    const btn = document.getElementById('btn-register');
+    const username = (document.getElementById('reg-username')?.value || '').trim();
+    const email = (document.getElementById('reg-email')?.value || '').trim();
+    const pw = document.getElementById('reg-password')?.value || '';
+    const pw2 = document.getElementById('reg-password2')?.value || '';
+    if (errEl) errEl.classList.add('hidden');
+    if (pw !== pw2) {
+        if (errEl) { errEl.textContent = 'Passwords do not match.'; errEl.classList.remove('hidden'); } return;
+    }
+    let turnstile_token = '';
+    if (_authConfig.turnstile_site_key && window.turnstile) {
+        turnstile_token = window.turnstile.getResponse() || '';
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
     try {
-        const res = await fetch('/api/auth/guest', { method: 'POST' });
-        if (res.ok) {
-            sessionStorage.setItem('slopsmith_role', 'guest');
+        const res = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, email, password: pw, turnstile_token }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            sessionStorage.setItem('slopsmith_role', data.role || 'user');
+            sessionStorage.setItem('slopsmith_username', data.username || username);
             if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+        } else {
+            if (errEl) { errEl.textContent = data.error || 'Registration failed.'; errEl.classList.remove('hidden'); }
+            if (window.turnstile) window.turnstile.reset();
         }
-    } catch (_) {}
+    } catch (e) {
+        if (errEl) { errEl.textContent = 'Could not reach server.'; errEl.classList.remove('hidden'); }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
+    }
 }
 
 async function authLogout() {
     try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
     sessionStorage.removeItem('slopsmith_role');
+    sessionStorage.removeItem('slopsmith_username');
     location.reload();
 }
 

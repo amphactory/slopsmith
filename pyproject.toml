@@ -5,3 +5,9 @@
 pythonpath = [".", "lib"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+[project]
+name = "slopsmith"
+version = "0.1.0"
+dependencies = [
+    "dotenv>=0.9.9",
+]
