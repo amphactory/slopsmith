@@ -1,8 +1,18 @@
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    # Not exposed on host — web connects via container name "redis"
+
   web:
     build: .
     ports:
       - "8000:8000"
+    depends_on:
+      - redis
     volumes:
       # Mount your Rocksmith DLC folder (adjust path for your system)
       - ${DLC_PATH:-~/.local/share/Steam/steamapps/common/Rocksmith2014/dlc}:/dlc
@@ -23,6 +33,7 @@ services:
       - CONFIG_DIR=/config
       - RSCLI_PATH=/opt/rscli/RsCli
       - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+      - REDIS_HOST=redis
       # Logging (optional)
       # - LOG_LEVEL=DEBUG       # DEBUG | INFO | WARNING | ERROR  (default: INFO)
       # - LOG_FORMAT=json       # json | text  (default: text — coloured console)
@@ -33,3 +44,4 @@ services:
 
 volumes:
   rocksmith-config:
+  redis-data:
