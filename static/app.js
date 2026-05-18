@@ -3416,18 +3416,22 @@ window.addEventListener('resize', _updateFabPosition);
 function _updateFabPosition() {
     const fab = document.getElementById('player-fab');
     const controls = document.getElementById('player-controls');
+    const seekbar = document.getElementById('player-seekbar');
     if (!fab) return;
     const controlsH = (controls && controls.style.display !== 'none') ? controls.offsetHeight : 0;
-    fab.style.bottom = (controlsH + 8) + 'px';
+    const seekH = (seekbar && seekbar.style.display !== 'none') ? seekbar.offsetHeight : 0;
+    fab.style.bottom = (controlsH + seekH + 8) + 'px';
 }
 
 let _controlsVisible = true;
 function togglePlayerControls() {
     const controls = document.getElementById('player-controls');
+    const seekbar = document.getElementById('player-seekbar');
     const btn = document.getElementById('btn-controls-toggle');
     if (!controls) return;
     _controlsVisible = !_controlsVisible;
     controls.style.display = _controlsVisible ? '' : 'none';
+    if (seekbar) seekbar.style.display = _controlsVisible ? '' : 'none';
     btn.title = _controlsVisible ? 'Hide controls' : 'Show controls';
     btn.style.background = _controlsVisible ? '' : 'rgba(64,128,224,0.3)';
     _updateFabPosition();
@@ -4381,6 +4385,7 @@ async function startCountIn() {
 
 // Time display + highway sync
 let lastAudioTime = 0;
+let _seekSliderDragging = false;
 setInterval(() => {
     let ct = _audioTime();
     const dur = _audioDuration();
@@ -4409,6 +4414,14 @@ setInterval(() => {
         }
         lastAudioTime = ct;
         document.getElementById('hud-time').textContent = `${formatTime(ct)} / ${formatTime(dur)}`;
+        if (!_seekSliderDragging) {
+            const sl = document.getElementById('seek-slider');
+            if (sl) sl.value = Math.round((ct / dur) * 1000);
+            const cur = document.getElementById('seek-time-cur');
+            if (cur) cur.textContent = formatTime(ct);
+        }
+        const durEl = document.getElementById('seek-time-dur');
+        if (durEl) durEl.textContent = formatTime(dur);
     }
     if (!_countingIn) highway.setTime(ct);
 }, 1000 / 60);
