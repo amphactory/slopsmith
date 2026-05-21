@@ -168,6 +168,92 @@
         </div>
     </div>
 
+    <!-- ══ ONBOARDING (post-register profile setup) ═══════════════════════ -->
+    <div id="onboard" class="screen">
+        <div class="min-h-screen flex items-center justify-center px-4 pt-16">
+            <div class="w-full max-w-md">
+                <div class="text-center mb-8">
+                    <div class="text-5xl mb-4">🎉</div>
+                    <h1 class="text-3xl font-bold bg-gradient-to-r from-accent-light to-purple-400 bg-clip-text text-transparent">Welcome!</h1>
+                    <p class="text-gray-500 mt-2 text-sm">Set up your profile to get started</p>
+                </div>
+                <div class="bg-dark-700 border border-gray-800 rounded-2xl p-8 space-y-6">
+                    <!-- Avatar -->
+                    <div class="flex flex-col items-center gap-2">
+                        <div class="relative cursor-pointer group" onclick="document.getElementById('onboard-avatar-file').click()">
+                            <img id="onboard-avatar-preview" src="" alt="avatar"
+                                 class="w-20 h-20 rounded-full object-cover border-2 border-gray-700 group-hover:border-accent/50 transition hidden">
+                            <div id="onboard-avatar-placeholder"
+                                 class="w-20 h-20 rounded-full bg-dark-600 border-2 border-gray-700 flex items-center justify-center text-3xl select-none group-hover:border-accent/50 transition">
+                                📷
+                            </div>
+                        </div>
+                        <input type="file" id="onboard-avatar-file" accept="image/*" class="hidden"
+                               onchange="onboardAvatarPreview(this)">
+                        <p class="text-xs text-gray-600">Click to add a photo</p>
+                    </div>
+                    <!-- Display name -->
+                    <div>
+                        <label class="text-sm font-medium text-gray-400 mb-2 block">Display name</label>
+                        <input type="text" id="onboard-display-name" maxlength="50"
+                               placeholder="How others see you"
+                               class="w-full bg-dark-600 border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 focus:border-accent/50 focus:ring-1 focus:ring-accent/30 outline-none transition">
+                    </div>
+                    <!-- Bio -->
+                    <div>
+                        <label class="text-sm font-medium text-gray-400 mb-2 block">About me <span class="text-gray-600">(optional)</span></label>
+                        <textarea id="onboard-bio" maxlength="150" rows="2"
+                                  placeholder="Tell us a bit about yourself..."
+                                  oninput="document.getElementById('onboard-bio-count').textContent = this.value.length"
+                                  class="w-full bg-dark-600 border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 focus:border-accent/50 focus:ring-1 focus:ring-accent/30 outline-none resize-none transition"></textarea>
+                        <p class="text-xs text-gray-600 mt-1"><span id="onboard-bio-count">0</span>/150</p>
+                    </div>
+                    <!-- Role selector -->
+                    <div>
+                        <label class="text-sm font-medium text-gray-400 mb-3 block">Your role</label>
+                        <div class="grid grid-cols-5 gap-2">
+                            <button onclick="selectOnboardRole('lead')" data-role="lead"
+                                    class="onboard-role-btn flex flex-col items-center justify-center gap-1.5 bg-dark-600 border border-gray-700 rounded-xl py-3 px-1 hover:border-accent/50 transition">
+                                <span class="text-xl">🎸</span>
+                                <span class="text-xs text-gray-400 leading-tight text-center">Lead</span>
+                            </button>
+                            <button onclick="selectOnboardRole('rhythm')" data-role="rhythm"
+                                    class="onboard-role-btn flex flex-col items-center justify-center gap-1.5 bg-dark-600 border border-gray-700 rounded-xl py-3 px-1 hover:border-accent/50 transition">
+                                <span class="text-xl">🎵</span>
+                                <span class="text-xs text-gray-400 leading-tight text-center">Rhythm</span>
+                            </button>
+                            <button onclick="selectOnboardRole('bass')" data-role="bass"
+                                    class="onboard-role-btn flex flex-col items-center justify-center gap-1.5 bg-dark-600 border border-gray-700 rounded-xl py-3 px-1 hover:border-accent/50 transition">
+                                <span class="text-xl">🔊</span>
+                                <span class="text-xs text-gray-400 leading-tight text-center">Bassist</span>
+                            </button>
+                            <button onclick="selectOnboardRole('vocals')" data-role="vocals"
+                                    class="onboard-role-btn flex flex-col items-center justify-center gap-1.5 bg-dark-600 border border-gray-700 rounded-xl py-3 px-1 hover:border-accent/50 transition">
+                                <span class="text-xl">🎤</span>
+                                <span class="text-xs text-gray-400 leading-tight text-center">Singer</span>
+                            </button>
+                            <button onclick="selectOnboardRole('drums')" data-role="drums"
+                                    class="onboard-role-btn flex flex-col items-center justify-center gap-1.5 bg-dark-600 border border-gray-700 rounded-xl py-3 px-1 hover:border-accent/50 transition">
+                                <span class="text-xl">🥁</span>
+                                <span class="text-xs text-gray-400 leading-tight text-center">Drummer</span>
+                            </button>
+                        </div>
+                    </div>
+                    <p id="onboard-error" class="text-xs text-red-400 hidden"></p>
+                    <button onclick="completeOnboarding()" id="btn-onboard"
+                            class="w-full bg-accent hover:bg-accent-light px-6 py-3 rounded-xl text-sm font-semibold text-white transition">
+                        Let's Go!
+                    </button>
+                    <div class="text-center">
+                        <button onclick="skipOnboarding()" class="text-xs text-gray-600 hover:text-gray-400 transition">
+                            Skip for now
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ══ HOME (Hero + Library) ══════════════════════════════════════════ -->
     <div id="home" class="screen active">
         <!-- Library -->

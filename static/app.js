@@ -6027,7 +6027,7 @@ async function registerUser() {
             sessionStorage.setItem('slopsmith_role', data.role || 'user');
             sessionStorage.setItem('slopsmith_username', data.username || username);
             if (data.user_id) sessionStorage.setItem('slopsmith_user_id', data.user_id);
-            if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+            showOnboard();
         } else {
             if (errEl) { errEl.textContent = data.error || 'Registration failed.'; errEl.classList.remove('hidden'); }
             if (window.turnstile) window.turnstile.reset();
@@ -6037,6 +6037,97 @@ async function registerUser() {
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
     }
+}
+
+function showOnboard() {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const el = document.getElementById('onboard');
+    if (el) el.classList.add('active');
+    // reset state
+    document.querySelectorAll('.onboard-role-btn').forEach(b => {
+        b.classList.remove('border-accent', 'bg-accent/10');
+        b.classList.add('border-gray-700', 'bg-dark-600');
+        b.querySelector('span.text-xs')?.classList.remove('text-accent-light');
+        b.querySelector('span.text-xs')?.classList.add('text-gray-400');
+    });
+    const errEl = document.getElementById('onboard-error');
+    if (errEl) errEl.classList.add('hidden');
+    const preview = document.getElementById('onboard-avatar-preview');
+    const placeholder = document.getElementById('onboard-avatar-placeholder');
+    if (preview) { preview.src = ''; preview.classList.add('hidden'); }
+    if (placeholder) placeholder.classList.remove('hidden');
+    const fileInput = document.getElementById('onboard-avatar-file');
+    if (fileInput) fileInput.value = '';
+    const nameEl = document.getElementById('onboard-display-name');
+    if (nameEl) nameEl.value = '';
+    const bioEl = document.getElementById('onboard-bio');
+    if (bioEl) bioEl.value = '';
+    const countEl = document.getElementById('onboard-bio-count');
+    if (countEl) countEl.textContent = '0';
+}
+
+function onboardAvatarPreview(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+        const preview = document.getElementById('onboard-avatar-preview');
+        const placeholder = document.getElementById('onboard-avatar-placeholder');
+        if (preview) { preview.src = e.target.result; preview.classList.remove('hidden'); }
+        if (placeholder) placeholder.classList.add('hidden');
+    };
+    reader.readAsDataURL(file);
+}
+
+function selectOnboardRole(value) {
+    document.querySelectorAll('.onboard-role-btn').forEach(btn => {
+        const sel = btn.dataset.role === value;
+        btn.classList.toggle('border-accent', sel);
+        btn.classList.toggle('bg-accent/10', sel);
+        btn.classList.toggle('border-gray-700', !sel);
+        btn.classList.toggle('bg-dark-600', !sel);
+        const label = btn.querySelector('span.text-xs');
+        if (label) {
+            label.classList.toggle('text-accent-light', sel);
+            label.classList.toggle('text-gray-400', !sel);
+        }
+    });
+}
+
+function _getOnboardRole() {
+    const btn = document.querySelector('.onboard-role-btn.border-accent');
+    return btn ? btn.dataset.role : '';
+}
+
+async function completeOnboarding() {
+    const errEl = document.getElementById('onboard-error');
+    const btn = document.getElementById('btn-onboard');
+    if (errEl) errEl.classList.add('hidden');
+    const display_name = (document.getElementById('onboard-display-name')?.value || '').trim();
+    const bio = (document.getElementById('onboard-bio')?.value || '').trim();
+    const instrument = _getOnboardRole();
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+    try {
+        await fetch('/api/profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ display_name, bio, instrument }),
+        });
+        const fileInput = document.getElementById('onboard-avatar-file');
+        if (fileInput && fileInput.files && fileInput.files[0]) {
+            const form = new FormData();
+            form.append('avatar', fileInput.files[0]);
+            await fetch('/api/profile/avatar', { method: 'POST', body: form });
+        }
+        if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+    } catch (e) {
+        if (errEl) { errEl.textContent = 'Could not save profile.'; errEl.classList.remove('hidden'); }
+        if (btn) { btn.disabled = false; btn.textContent = "Let's Go!"; }
+    }
+}
+
+function skipOnboarding() {
+    if (_loginResolve) { _loginResolve(); _loginResolve = null; }
 }
 
 async function authLogout() {
