@@ -4,6 +4,11 @@ Slopsmith is a self-hosted web app for Rocksmith 2014 Custom DLC. It uses a **Fa
 
 ---
 
+## Important
+
+Do not implement plugins. This application is completely custom and does not need new plugins.
+Changes must be made directly on source.
+
 ## Plugin System
 
 Plugins reside in `plugins/<name>/` and require a `plugin.json` manifest. They can extend the frontend, backend, or settings.

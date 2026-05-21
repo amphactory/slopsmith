@@ -190,14 +190,14 @@
                     <!-- Grid controls -->
                     <select id="lib-sort" onchange="sortLibrary()"
                         class="lib-grid-ctrl bg-dark-700 border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-300 outline-none">
-                        <option value="artist">Artist A-Z</option>
-                        <option value="artist-desc">Artist Z-A</option>
-                        <option value="title">Title A-Z</option>
-                        <option value="title-desc">Title Z-A</option>
+                        <option value="title">Alphabetic (A→Z)</option>
+                        <option value="title-desc">Alphabetic (Z→A)</option>
+                        <option value="artist">Artist (A→Z)</option>
+                        <option value="artist-desc">Artist (Z→A)</option>
+                        <option value="tuning">Tuning</option>
                         <option value="recent">Recently Added</option>
                         <option value="year-desc">Year (newest)</option>
                         <option value="year">Year (oldest)</option>
-                        <option value="tuning">Tuning</option>
                     </select>
                     <!-- Format filter (shared) -->
                     <select id="lib-format" onchange="sortLibrary()"
@@ -300,12 +300,12 @@
                     </div>
                     <select id="fav-sort" onchange="sortFavorites()"
                         class="fav-grid-ctrl bg-dark-700 border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-300 outline-none">
-                        <option value="artist">Artist A-Z</option>
-                        <option value="artist-desc">Artist Z-A</option>
-                        <option value="title">Title A-Z</option>
-                        <option value="title-desc">Title Z-A</option>
-                        <option value="recent">Recently Added</option>
+                        <option value="title">Alphabetic (A→Z)</option>
+                        <option value="title-desc">Alphabetic (Z→A)</option>
+                        <option value="artist">Artist (A→Z)</option>
+                        <option value="artist-desc">Artist (Z→A)</option>
                         <option value="tuning">Tuning</option>
+                        <option value="recent">Recently Added</option>
                     </select>
                     <button onclick="toggleAllFavoriteArtists(true)" class="fav-tree-ctrl bg-dark-700 border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-400 hover:text-white transition">Expand All</button>
                     <button onclick="toggleAllFavoriteArtists(false)" class="fav-tree-ctrl bg-dark-700 border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-400 hover:text-white transition">Collapse All</button>

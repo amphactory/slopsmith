@@ -993,6 +993,8 @@ let _gridObserver = null;
 // Bumped on filter/sort/view changes so in-flight page fetches can detect
 // they've been superseded and skip rendering stale results.
 let _libEpoch = 0;
+// Tracks last rendered group-divider key per grid container for infinite scroll.
+const _lastGridGroupKey = { 'lib-grid': null, 'fav-grid': null };
 
 // ── Library filters (slopsmith#129/#69) ────────────────────────────────
 //
@@ -1398,7 +1400,7 @@ async function loadGridPage(page = 0) {
     const total = data.total || 0;
     document.getElementById('lib-count').textContent = `${total} songs`;
 
-    renderGridCards(data.songs || [], 'lib-grid', page === 0 ? 'replace' : 'append');
+    renderGridCards(data.songs || [], 'lib-grid', page === 0 ? 'replace' : 'append', sort);
 
     _hasMore = (page + 1) * PAGE_SIZE < total;
     setupInfiniteScroll();
@@ -1457,9 +1459,41 @@ function formatBadgeInline(fmt, stemCount) {
     return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-900/60 text-blue-300">PSARC</span>`;
 }
 
-function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
+function _sortGroupKey(song, sort) {
+    if (sort === 'title' || sort === 'title-desc') {
+        const c = (song.title || '')[0]?.toUpperCase() || '#';
+        return /[A-Z]/.test(c) ? c : '#';
+    }
+    if (sort === 'artist' || sort === 'artist-desc') {
+        const c = (song.artist || '')[0]?.toUpperCase() || '#';
+        return /[A-Z]/.test(c) ? c : '#';
+    }
+    if (sort === 'tuning') {
+        return song.tuning_name || song.tuning || '—';
+    }
+    return null;
+}
+
+function _renderGroupDivider(key) {
+    return `<div class="col-span-full flex items-center gap-4 pt-6 pb-1 select-none">
+        <span class="text-base font-bold text-gray-500 min-w-[1.5rem]">${esc(key)}</span>
+        <div class="flex-1 h-px bg-gray-800"></div>
+    </div>`;
+}
+
+function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace', sort = null) {
     const grid = document.getElementById(containerId);
-    const html = songs.map(s => {
+    const effectiveSort = sort ?? document.getElementById(containerId === 'fav-grid' ? 'fav-sort' : 'lib-sort')?.value ?? '';
+
+    if (mode !== 'append') _lastGridGroupKey[containerId] = null;
+
+    const parts = [];
+    for (const s of songs) {
+        const groupKey = _sortGroupKey(s, effectiveSort);
+        if (groupKey !== null && groupKey !== _lastGridGroupKey[containerId]) {
+            parts.push(_renderGroupDivider(groupKey));
+            _lastGridGroupKey[containerId] = groupKey;
+        }
         const title = s.title || s.filename.replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
         const artist = s.artist || '';
         const duration = s.duration ? formatTime(s.duration) : '';
@@ -1475,7 +1509,7 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
             : '';
         const fmtBadge = formatBadge(s.format, s.stem_count);
         const ariaLabel = `Play ${title || s.filename}${artist ? ' by ' + artist : ''}`;
-        return `<div class="song-card group" data-play="${encodeURIComponent(s.filename)}" data-artist="${_escAttr(artist || '')}" tabindex="0" role="button" aria-label="${_escAttr(ariaLabel)}">
+        parts.push(`<div class="song-card group" data-play="${encodeURIComponent(s.filename)}" data-artist="${_escAttr(artist || '')}" tabindex="0" role="button" aria-label="${_escAttr(ariaLabel)}">
             <div class="card-art">
                 <img src="${artUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
                 <span class="placeholder" style="display:none">🎸</span>
@@ -1507,8 +1541,9 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
                 </div>
                 ${retuneBtn}
             </div>
-        </div>`;
-    }).join('');
+        </div>`);
+    }
+    const html = parts.join('');
     if (mode === 'append') {
         grid.insertAdjacentHTML('beforeend', html);
     } else {
@@ -1858,7 +1893,7 @@ async function loadFavGridPage(page = 0) {
     const totalPages = Math.ceil((data.total || 0) / PAGE_SIZE);
     document.getElementById('fav-count').textContent =
         `${data.total || 0} favorites · Page ${favPage + 1} of ${Math.max(1, totalPages)}`;
-    renderGridCards(data.songs || [], 'fav-grid');
+    renderGridCards(data.songs || [], 'fav-grid', 'replace', sort);
     renderFavPagination(totalPages);
 }
 
@@ -6150,7 +6185,7 @@ async function uploadAvatar(input) {
     // string. Without this, the first page would always load with
     // "Artist A-Z" / "All formats" regardless of what the user had
     // picked previously.
-    const savedSort = _readPersistedChoice(_LIB_SORT_KEY, _LIB_SORT_VALUES, 'artist');
+    const savedSort = _readPersistedChoice(_LIB_SORT_KEY, _LIB_SORT_VALUES, 'title');
     const savedFormat = _readPersistedChoice(_LIB_FORMAT_KEY, _LIB_FORMAT_VALUES, '');
     const sortEl = document.getElementById('lib-sort');
     const fmtEl = document.getElementById('lib-format');
